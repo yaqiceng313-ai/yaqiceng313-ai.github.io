@@ -437,7 +437,11 @@
           <div class="container">
             <div class="section-head"><div><span class="eyebrow">Projects</span><h2 class="section-title">项目实践</h2></div><span class="muted">把想法变成可交付的成果</span></div>
             <div class="grid-3">${resume.projects.map((p, index) => `<article class="card project">
-              ${index === 0 ? `<img class="project-image" src="./img.jpg" alt="我的作品集第一张作品" onerror="this.style.display='none'">` : ""}
+              ${index === 0 ? `
+<img class="project-image" 
+     src="./img.jpg" 
+     alt="我的作品集第一张作品">
+` : ""}
               <div class="project-top"><span class="eyebrow">${safe(p.role)}</span></div>
               <h3>${safe(p.name)}</h3><small class="muted">${safe(p.time)}</small>
               <p>${safe(p.description)}</p><strong>${safe(p.result)}</strong>
