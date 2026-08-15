@@ -149,6 +149,7 @@
     .tab-panel[hidden] { display: none; }
     .timeline { display: grid; gap: 16px; }
     .experience { display: grid; grid-template-columns: 180px 1fr; gap: 24px; }
+    .experience.no-period { grid-template-columns: 1fr; }
     .period { color: var(--primary); font-size: .9rem; font-weight: 800; }
     .experience h3, .project h3 { margin: 0 0 5px; font-size: 1.2rem; }
     .experience ul { margin: 15px 0 0; padding-left: 20px; color: var(--muted); }
@@ -266,6 +267,7 @@
     const resume = {
       name: "曾雅琦",
       title: "互联网运营 / 咨询顾问 / 客户服务 / 综合管理",
+      school: "河南工程学院 · 服装设计与工程",
       summary: "具备良好的沟通协调、客户服务与项目执行能力，能够快速理解需求、整合资源并推动事项落地。注重用户体验与工作效率，擅长信息整理、数据分析、报告撰写及多任务推进。",
       phone: "13309050845",
       emailParts: ["1173740476", "qq.com"],
@@ -283,7 +285,7 @@
           {
             org: "业务运营 / 客户服务经历",
             role: "运营与客户服务",
-            time: "工作经历信息待补充",
+            time: "",
             points: [
               "负责客户服务、业务运营及项目支持等相关工作，深入了解客户需求，及时响应并解决业务问题，持续提升用户体验与服务质量。",
               "通过优化工作流程、完善沟通机制，提高团队协作效率，推动日常业务处理效率提升 30%+。",
@@ -295,7 +297,7 @@
           {
             org: "客户服务 / 综合事务经历",
             role: "客户服务与业务支持",
-            time: "工作经历信息待补充",
+            time: "",
             image: "IMG_1123.jpg",
             imageCaption: "参加外呼企业培训",
             image2: "IMG_1130.jpg",
@@ -386,6 +388,7 @@
             <img class="avatar" src="pic.jpg" alt="曾雅琦的个人头像" loading="lazy">
             <h2>${safe(resume.name)}</h2>
             <div class="muted">${safe(resume.title)}</div>
+            <div class="muted" style="margin-top:4px;font-size:.88rem;">${safe(resume.school)}</div>
             <div class="contact-list">
               <a class="contact-item" href="tel:${resume.phone}">☎ <b>${safe(resume.phone)}</b></a>
               <div class="contact-item">✉ <b id="emailText"></b></div>
@@ -418,8 +421,8 @@
     function experiencePanel(key, items) {
       return `<div class="tab-panel" id="panel-${key}" role="tabpanel">
         <div class="timeline">${items.map(item => `
-          <article class="card experience">
-            <div class="period">${safe(item.time)}</div>
+          <article class="card experience${item.time ? '' : ' no-period'}">
+            ${item.time ? `<div class="period">${safe(item.time)}</div>` : ""}
             <div><h3>${safe(item.role)}</h3><div class="muted">${safe(item.org)}</div>
             ${item.image ? `<div style="margin-top:14px;display:flex;gap:12px;flex-wrap:wrap;">${item.image2 ? `<div style="flex:1;min-width:140px;max-width:200px;"><img src="${safe(item.image)}" alt="${safe(item.imageCaption || '')}" style="width:100%;border-radius:10px;display:block;border:1px solid var(--line);"><small style="display:block;margin-top:4px;color:var(--muted);font-size:.82rem;">${safe(item.imageCaption || '')}</small></div><div style="flex:1;min-width:140px;max-width:200px;"><img src="${safe(item.image2)}" alt="${safe(item.image2Caption || '')}" style="width:100%;border-radius:10px;display:block;border:1px solid var(--line);"><small style="display:block;margin-top:4px;color:var(--muted);font-size:.82rem;">${safe(item.image2Caption || '')}</small></div>` : `<div style="max-width:200px;"><img src="${safe(item.image)}" alt="${safe(item.imageCaption || '')}" style="width:100%;border-radius:10px;display:block;border:1px solid var(--line);"><small style="display:block;margin-top:4px;color:var(--muted);font-size:.82rem;">${safe(item.imageCaption || '')}</small></div>`}</div>` : ""}
             <ul>${item.points.map(p => `<li>${safe(p)}</li>`).join("")}</ul></div>
