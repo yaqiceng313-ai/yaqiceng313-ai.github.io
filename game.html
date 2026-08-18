@@ -70,6 +70,16 @@ canvas{display:block;position:absolute;top:0;left:0;width:100%;height:100%}
 .mob:active{background:#00f0ff33}
 #bb{bottom:calc(var(--scale)*10px);right:calc(var(--scale)*20px)}#bs{bottom:calc(var(--scale)*10px);right:calc(var(--scale)*90px)}
 @media(max-width:500px),(pointer:coarse){#mc{display:block}}
+
+/* 音频控制 */
+#ac{display:none;position:absolute;top:calc(var(--scale)*8px);right:calc(var(--scale)*12px);z-index:30;pointer-events:auto}
+#ac .abtn{width:calc(var(--scale)*28px);height:calc(var(--scale)*28px);background:#00f0ff15;border:1px solid #00f0ff44;color:#00f0ff88;font-size:calc(var(--scale)*14px);cursor:pointer;border-radius:3px;display:flex;align-items:center;justify-content:center;transition:all .3s;margin-left:calc(var(--scale)*4px)}
+#ac .abtn:hover{background:#00f0ff22;border-color:#00f0ff;color:#00f0ff}
+#ac .abtn.muted{color:#ff446688;border-color:#ff446644}
+#audio-start{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:35;pointer-events:auto}
+#audio-start .asbtn{padding:calc(var(--scale)*10px) calc(var(--scale)*20px);font-size:calc(var(--scale)*13px);font-family:inherit;color:#00f0ff;background:#00f0ff11;border:1px solid #00f0ff66;cursor:pointer;letter-spacing:calc(var(--scale)*2px);border-radius:3px;transition:all .3s}
+#audio-start .asbtn:hover{background:#00f0ff22;box-shadow:0 0 calc(var(--scale)*20px) #00f0ff33}
+#audio-start .asbtn .asicon{font-size:calc(var(--scale)*20px)}
 </style>
 </head>
 <body>
@@ -96,6 +106,12 @@ canvas{display:block;position:absolute;top:0;left:0;width:100%;height:100%}
       <button class="mb" id="brestart">再 来 一 局</button><button class="mb" id="bmenu">返 回 菜 单</button>
     </div>
     <div id="mc"><div class="mob" id="bb">💣</div><div class="mob" id="bs">⚡</div></div>
+    <div id="ac">
+      <button class="abtn" id="abtn-mute" title="静音">♪</button>
+    </div>
+    <div id="audio-start">
+      <button class="asbtn" id="asbtn-start"><span class="asicon">🔊</span>启动音频</button>
+    </div>
   </div>
 </div>
 
@@ -200,61 +216,543 @@ Input.prototype.getMovement = function() {
 };
 Input.prototype.clearFrame = function() { this.jp = {}; this.tdx = 0; this.tdy = 0; };
 
-// ========== AUDIO ==========
+// ========== AUDIO ENGINE ==========
 function AudioManager() {
-  this.ctx = null; this.enabled = true;
-  try { this.ctx = new (window.AudioContext || window.webkitAudioContext)(); }
-  catch (e) { this.enabled = false; }
+  this.masterGain = null;
+  this.musicGain = null;
+  this.sfxGain = null;
+  this.envGain = null;
+  this.ctx = null;
+  this.enabled = false;
+  this.initialized = false;
+  this.musicVol = 0.5;
+  this.sfxVol = 0.6;
+  this.envVol = 0.3;
+  this.muted = false;
+
+  // BGM状态
+  this.musicState = 'ambient'; // ambient | explore | battle | boss
+  this.musicTarget = 'ambient';
+  this.musicFadeTime = 0;
+  this.musicFadeDuration = 1.5;
+  this.musicNodes = {};
+
+  // 音效池
+  this.sfxPool = [];
+  this.maxSfx = 12;
+
+  // 环境音
+  this.envNodes = null;
+
+  // 空间效果
+  this.reverbNode = null;
+  this.reverbGain = null;
+
+  this._init();
 }
-AudioManager.prototype._ensure = function() {
-  if (!this.enabled || !this.ctx) { return false; }
-  if (this.ctx.state === 'suspended') { this.ctx.resume(); }
-  return true;
+
+AudioManager.prototype._init = function() {
+  try {
+    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  } catch (e) { return; }
+
+  // 主控
+  this.masterGain = this.ctx.createGain();
+  this.masterGain.gain.value = 0.8;
+  this.masterGain.connect(this.ctx.destination);
+
+  // 分轨
+  this.musicGain = this.ctx.createGain(); this.musicGain.gain.value = 0;
+  this.musicGain.connect(this.masterGain);
+  this.sfxGain = this.ctx.createGain(); this.sfxGain.gain.value = this.sfxVol;
+  this.sfxGain.connect(this.masterGain);
+  this.envGain = this.ctx.createGain(); this.envGain.gain.value = 0;
+  this.envGain.connect(this.masterGain);
+
+  // 简易混响（延迟网络模拟）
+  this._setupReverb();
+
+  this.initialized = true;
 };
-AudioManager.prototype._play = function(freq, type, duration, vol, rampDown) {
-  if (!this._ensure()) { return; }
+
+AudioManager.prototype._setupReverb = function() {
+  this.reverbGain = this.ctx.createGain();
+  this.reverbGain.gain.value = 0.15;
+  this.reverbGain.connect(this.sfxGain);
+  var delays = [0.023, 0.037, 0.051, 0.067, 0.079, 0.097];
+  for (var i = 0; i < delays.length; i++) {
+    var d = this.ctx.createDelay(0.1);
+    d.delayTime.value = delays[i];
+    var g = this.ctx.createGain();
+    g.gain.value = 0.12 / (i + 1);
+    var f = this.ctx.createBiquadFilter();
+    f.type = 'lowpass'; f.frequency.value = 2000 - i * 300;
+    d.connect(f); f.connect(g); g.connect(this.reverbGain);
+    d.connect(this.reverbGain);
+    this.reverbNode = d;
+  }
+};
+
+AudioManager.prototype._ensure = function() {
+  if (!this.initialized || !this.ctx) { return false; }
+  if (this.ctx.state === 'suspended') { this.ctx.resume(); }
+  return this.ctx.state === 'running';
+};
+
+// ============ 用户激活 ============
+AudioManager.prototype.activate = function() {
+  if (!this.initialized) { return; }
+  this._ensure();
+  this.enabled = true;
+  this.musicGain.gain.value = this.musicVol;
+  this.sfxGain.gain.value = this.sfxVol;
+  this.envGain.gain.value = this.envVol;
+  this._startEnv();
+  this._startMusic();
+};
+
+// ============ 音量控制 ============
+AudioManager.prototype.setMusicVolume = function(v) {
+  this.musicVol = v;
+  if (this.enabled) { this.musicGain.gain.setTargetAtTime(this.muted ? 0 : v, this.ctx.currentTime, 0.1); }
+};
+AudioManager.prototype.setSfxVolume = function(v) {
+  this.sfxVol = v;
+  if (this.enabled) { this.sfxGain.gain.setTargetAtTime(this.muted ? 0 : v, this.ctx.currentTime, 0.1); }
+};
+AudioManager.prototype.setEnvVolume = function(v) {
+  this.envVol = v;
+  if (this.enabled) { this.envGain.gain.setTargetAtTime(this.muted ? 0 : v, this.ctx.currentTime, 0.1); }
+};
+AudioManager.prototype.toggleMute = function() {
+  this.muted = !this.muted;
+  var t = this.ctx.currentTime;
+  this.musicGain.gain.setTargetAtTime(this.muted ? 0 : this.musicVol, t, 0.08);
+  this.sfxGain.gain.setTargetAtTime(this.muted ? 0 : this.sfxVol, t, 0.08);
+  this.envGain.gain.setTargetAtTime(this.muted ? 0 : this.envVol, t, 0.08);
+  return this.muted;
+};
+
+// ============ 基础音效播放 ============
+AudioManager.prototype._playTone = function(freq, type, duration, vol, gainNode, rampDown, freqEnd) {
+  if (!this._ensure() || this.muted) { return; }
   if (vol === undefined) { vol = 0.1; }
   if (rampDown === undefined) { rampDown = true; }
   var t = this.ctx.currentTime;
   var osc = this.ctx.createOscillator();
-  var gain = this.ctx.createGain();
+  var g = this.ctx.createGain();
   osc.type = type;
   osc.frequency.setValueAtTime(freq, t);
-  gain.gain.setValueAtTime(vol, t);
-  if (rampDown) { gain.gain.exponentialRampToValueAtTime(0.001, t + duration); }
-  osc.connect(gain); gain.connect(this.ctx.destination);
+  if (freqEnd) { osc.frequency.exponentialRampToValueAtTime(freqEnd, t + duration); }
+  g.gain.setValueAtTime(vol, t);
+  if (rampDown) { g.gain.exponentialRampToValueAtTime(0.001, t + duration); }
+  osc.connect(g);
+  var target = gainNode || this.sfxGain;
+  g.connect(target);
+  // 也发送到混响
+  g.connect(this.reverbGain);
   osc.start(t); osc.stop(t + duration);
+  return osc;
 };
-AudioManager.prototype.shoot = function() { this._play(800, 'square', 0.06, 0.05); };
-AudioManager.prototype.hit = function() { this._play(150, 'square', 0.1, 0.06); };
-AudioManager.prototype.explode = function() {
-  if (!this._ensure()) { return; }
+
+AudioManager.prototype._playNoise = function(duration, vol, filterFreq, gainNode) {
+  if (!this._ensure() || this.muted) { return; }
   var t = this.ctx.currentTime;
-  var len = this.ctx.sampleRate * 0.15;
+  var len = this.ctx.sampleRate * duration;
   var buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
   var data = buf.getChannelData(0);
-  for (var i = 0; i < data.length; i++) { data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 2); }
+  for (var i = 0; i < data.length; i++) {
+    data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 1.5);
+  }
   var src = this.ctx.createBufferSource(); src.buffer = buf;
-  var gain = this.ctx.createGain();
-  gain.gain.setValueAtTime(0.08, t);
-  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
-  var filter = this.ctx.createBiquadFilter();
-  filter.type = 'lowpass'; filter.frequency.setValueAtTime(400, t);
-  src.connect(filter); filter.connect(gain); gain.connect(this.ctx.destination);
+  var g = this.ctx.createGain();
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + duration);
+  var target = gainNode || this.sfxGain;
+  if (filterFreq) {
+    var f = this.ctx.createBiquadFilter();
+    f.type = 'lowpass'; f.frequency.setValueAtTime(filterFreq, t);
+    src.connect(f); f.connect(g);
+  } else { src.connect(g); }
+  g.connect(target);
+  g.connect(this.reverbGain);
   src.start(t);
 };
-AudioManager.prototype.powerup = function() {
-  this._play(600, 'sine', 0.08, 0.07);
-  var self = this; setTimeout(function() { self._play(900, 'sine', 0.08, 0.07); }, 60);
+
+// ============ 音效池管理 ============
+AudioManager.prototype._acquireSfxSlot = function() {
+  var now = this.ctx.currentTime;
+  this.sfxPool = this.sfxPool.filter(function(s) { return s.endTime > now; });
+  if (this.sfxPool.length >= this.maxSfx) { this.sfxPool.shift(); }
+  var slot = { endTime: now + 2 };
+  this.sfxPool.push(slot);
+  return slot;
 };
-AudioManager.prototype.bomb = function() { this._play(60, 'sawtooth', 0.35, 0.12); };
-AudioManager.prototype.bossWarning = function() { this._play(100, 'square', 0.3, 0.08); };
-AudioManager.prototype.dash = function() { this._play(1200, 'sine', 0.1, 0.04); };
+
+// ============ 武器音效 ============
+AudioManager.prototype.shoot = function() {
+  this._acquireSfxSlot();
+  // 激光射击：高频电子冲击
+  this._playTone(1200, 'square', 0.04, 0.04, null, true, 400);
+  this._playTone(1800, 'sine', 0.03, 0.02, null, true, 600);
+  // 枪口低频能量
+  this._playTone(60, 'sine', 0.06, 0.03, null, false);
+};
+
+AudioManager.prototype.shootLaser = function() {
+  this._acquireSfxSlot();
+  this._playTone(1400, 'square', 0.05, 0.05, null, true, 300);
+  this._playTone(2000, 'sine', 0.03, 0.03, null, true, 500);
+};
+
+AudioManager.prototype.shootPlasma = function() {
+  this._acquireSfxSlot();
+  this._playTone(80, 'sawtooth', 0.12, 0.06, null, false);
+  this._playTone(200, 'sine', 0.1, 0.04, null, true, 50);
+  this._playNoise(0.08, 0.03, 300);
+};
+
+AudioManager.prototype.shootMissile = function() {
+  this._acquireSfxSlot();
+  this._playNoise(0.1, 0.04, 600);
+  this._playTone(300, 'sawtooth', 0.15, 0.04, null, true, 80);
+};
+
+// ============ 命中音效 ============
+AudioManager.prototype.hit = function() {
+  this._acquireSfxSlot();
+  // 金属撞击 + 能量破裂
+  this._playTone(200, 'square', 0.06, 0.05, null, true, 50);
+  this._playTone(800, 'sine', 0.04, 0.03, null, true, 200);
+  this._playNoise(0.04, 0.03, 2000);
+};
+
+AudioManager.prototype.hitHeavy = function() {
+  this._acquireSfxSlot();
+  this._playTone(100, 'square', 0.1, 0.07, null, true, 30);
+  this._playTone(500, 'sawtooth', 0.08, 0.04, null, true, 100);
+  this._playNoise(0.06, 0.05, 1500);
+};
+
+// ============ 爆炸音效 ============
+AudioManager.prototype.explode = function(size) {
+  this._acquireSfxSlot();
+  var s = size || 'small';
+  var dur, vol, ff;
+  switch (s) {
+    case 'small': dur = 0.2; vol = 0.07; ff = 400; break;
+    case 'medium': dur = 0.35; vol = 0.1; ff = 300; break;
+    case 'large': dur = 0.5; vol = 0.14; ff = 200; break;
+    case 'boss': dur = 0.8; vol = 0.18; ff = 150; break;
+    default: dur = 0.2; vol = 0.07; ff = 400;
+  }
+  // 第一阶段：能量释放（高频）
+  this._playTone(600, 'square', dur * 0.3, vol * 0.5, null, true, 100);
+  this._playTone(300, 'sawtooth', dur * 0.4, vol * 0.4, null, true, 50);
+  // 第二阶段：低频冲击
+  this._playTone(40, 'sine', dur * 0.8, vol * 0.7, null, false);
+  // 第三阶段：碎片散落（噪声）
+  this._playNoise(dur, vol, ff);
+  // Boss额外：超低频震动
+  if (s === 'boss') {
+    this._playTone(20, 'sine', 1.0, 0.12, null, false);
+    this._playTone(60, 'sawtooth', 0.6, 0.06, null, true, 20);
+  }
+};
+
+// ============ 奖励音效 ============
+AudioManager.prototype.powerup = function() {
+  this._acquireSfxSlot();
+  // 科技感上升音阶
+  this._playTone(400, 'sine', 0.06, 0.05, null, true, 800);
+  var self = this;
+  setTimeout(function() { self._playTone(600, 'sine', 0.06, 0.05, null, true, 1200); }, 50);
+  setTimeout(function() { self._playTone(900, 'sine', 0.08, 0.06, null, true, 1600); }, 100);
+};
+
+AudioManager.prototype.levelUp = function() {
+  this._acquireSfxSlot();
+  var notes = [400, 500, 600, 800, 1000, 1200];
+  var self = this;
+  for (var i = 0; i < notes.length; i++) {
+    (function(n, idx) {
+      setTimeout(function() { self._playTone(n, 'sine', 0.1, 0.04, null, true, n * 1.2); }, idx * 60);
+    })(notes[i], i);
+  }
+};
+
+// ============ 特殊音效 ============
+AudioManager.prototype.bomb = function() {
+  this._acquireSfxSlot();
+  this._playTone(30, 'sawtooth', 0.5, 0.12, null, true, 10);
+  this._playTone(60, 'sine', 0.6, 0.08, null, false);
+  this._playNoise(0.4, 0.06, 200);
+};
+
+AudioManager.prototype.bossWarning = function() {
+  this._acquireSfxSlot();
+  for (var i = 0; i < 3; i++) {
+    var self = this;
+    (function(idx) {
+      setTimeout(function() {
+        self._playTone(80, 'square', 0.25, 0.08, null, true, 40);
+        self._playTone(120, 'sawtooth', 0.2, 0.04, null, true, 60);
+      }, idx * 300);
+    })(i);
+  }
+};
+
+AudioManager.prototype.dash = function() {
+  this._acquireSfxSlot();
+  this._playTone(1500, 'sine', 0.08, 0.04, null, true, 300);
+  this._playTone(1000, 'square', 0.06, 0.03, null, true, 200);
+};
+
+// ============ 环境音效 ============
+AudioManager.prototype._startEnv = function() {
+  if (!this._ensure() || this.envNodes) { return; }
+  var t = this.ctx.currentTime;
+  this.envNodes = {};
+
+  // 1. 深空低频氛围
+  var osc1 = this.ctx.createOscillator();
+  osc1.type = 'sine'; osc1.frequency.value = 35;
+  var g1 = this.ctx.createGain(); g1.gain.value = 0.03;
+  // 加入轻微频率调制
+  var lfo1 = this.ctx.createOscillator();
+  lfo1.type = 'sine'; lfo1.frequency.value = 0.08;
+  var lfoG1 = this.ctx.createGain(); lfoG1.gain.value = 3;
+  lfo1.connect(lfoG1); lfoG1.connect(osc1.frequency);
+  osc1.connect(g1); g1.connect(this.envGain);
+  osc1.start(t); lfo1.start(t);
+  this.envNodes.deepSpace = { osc: osc1, gain: g1, lfo: lfo1 };
+
+  // 2. 飞船引擎低鸣
+  var osc2 = this.ctx.createOscillator();
+  osc2.type = 'sawtooth'; osc2.frequency.value = 55;
+  var g2 = this.ctx.createGain(); g2.gain.value = 0.015;
+  var f2 = this.ctx.createBiquadFilter();
+  f2.type = 'lowpass'; f2.frequency.value = 120;
+  osc2.connect(f2); f2.connect(g2); g2.connect(this.envGain);
+  osc2.start(t);
+  this.envNodes.engine = { osc: osc2, gain: g2, filter: f2 };
+
+  // 3. 能量核心运行声
+  var osc3 = this.ctx.createOscillator();
+  osc3.type = 'triangle'; osc3.frequency.value = 180;
+  var g3 = this.ctx.createGain(); g3.gain.value = 0.008;
+  var f3 = this.ctx.createBiquadFilter();
+  f3.type = 'bandpass'; f3.frequency.value = 400; f3.Q.value = 3;
+  var lfo3 = this.ctx.createOscillator();
+  lfo3.type = 'sine'; lfo3.frequency.value = 0.15;
+  var lfoG3 = this.ctx.createGain(); lfoG3.gain.value = 20;
+  lfo3.connect(lfoG3); lfoG3.connect(f3.frequency);
+  osc3.connect(f3); f3.connect(g3); g3.connect(this.envGain);
+  osc3.start(t); lfo3.start(t);
+  this.envNodes.core = { osc: osc3, gain: g3, lfo: lfo3 };
+};
+
+// 太空通讯/无线电效果（随机触发）
+AudioManager.prototype.spaceComms = function() {
+  if (!this._ensure() || this.muted) { return; }
+  var t = this.ctx.currentTime;
+  var dur = 0.3 + Math.random() * 0.5;
+  var len = this.ctx.sampleRate * dur;
+  var buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+  var data = buf.getChannelData(0);
+  for (var i = 0; i < data.length; i++) {
+    var p = i / data.length;
+    data[i] = (Math.random() * 2 - 1) * Math.sin(p * Math.PI * 20) * Math.pow(1 - p, 0.5) * 0.3;
+  }
+  var src = this.ctx.createBufferSource(); src.buffer = buf;
+  var f = this.ctx.createBiquadFilter();
+  f.type = 'bandpass'; f.frequency.value = 800 + Math.random() * 1200; f.Q.value = 8;
+  var g = this.ctx.createGain(); g.gain.setValueAtTime(0.02, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  src.connect(f); f.connect(g); g.connect(this.envGain);
+  src.start(t);
+};
+
+// ============ BGM 动态音乐系统 ============
+AudioManager.prototype._startMusic = function() {
+  if (!this._ensure() || this.musicNodes.ambient) { return; }
+  var t = this.ctx.currentTime;
+
+  // Layer 1: 宇宙环境层 (always on, lowest)
+  var oscA1 = this.ctx.createOscillator();
+  oscA1.type = 'sine'; oscA1.frequency.value = 55;
+  var oscA2 = this.ctx.createOscillator();
+  oscA2.type = 'sine'; oscA2.frequency.value = 65.4;
+  var oscA3 = this.ctx.createOscillator();
+  oscA3.type = 'sine'; oscA3.frequency.value = 82.4;
+  var gA = this.ctx.createGain(); gA.gain.value = 0;
+  // 低频调制
+  var lfoA = this.ctx.createOscillator();
+  lfoA.type = 'sine'; lfoA.frequency.value = 0.06;
+  var lfoAG = this.ctx.createGain(); lfoAG.gain.value = 2;
+  lfoA.connect(lfoAG); lfoAG.connect(oscA1.frequency);
+  lfoAG.connect(oscA2.frequency);
+  lfoAG.connect(oscA3.frequency);
+  var fA = this.ctx.createBiquadFilter();
+  fA.type = 'lowpass'; fA.frequency.value = 200;
+  oscA1.connect(gA); oscA2.connect(gA); oscA3.connect(gA);
+  gA.connect(fA); fA.connect(this.musicGain);
+  oscA1.start(t); oscA2.start(t); oscA3.start(t); lfoA.start(t);
+  this.musicNodes.ambient = { oscs: [oscA1, oscA2, oscA3], gain: gA, lfo: lfoA, filter: fA };
+
+  // Layer 2: 探索层 (melodic)
+  var oscE1 = this.ctx.createOscillator();
+  oscE1.type = 'triangle'; oscE1.frequency.value = 220;
+  var oscE2 = this.ctx.createOscillator();
+  oscE2.type = 'sine'; oscE2.frequency.value = 330;
+  var gE = this.ctx.createGain(); gE.gain.value = 0;
+  var fE = this.ctx.createBiquadFilter();
+  fE.type = 'bandpass'; fE.frequency.value = 600; fE.Q.value = 1.5;
+  // 旋律调制
+  var lfoE = this.ctx.createOscillator();
+  lfoE.type = 'sine'; lfoE.frequency.value = 0.12;
+  var lfoEG = this.ctx.createGain(); lfoEG.gain.value = 30;
+  lfoE.connect(lfoEG); lfoEG.connect(oscE1.frequency);
+  oscE1.connect(gE); oscE2.connect(gE);
+  gE.connect(fE); fE.connect(this.musicGain);
+  oscE1.start(t); oscE2.start(t); lfoE.start(t);
+  this.musicNodes.explore = { oscs: [oscE1, oscE2], gain: gE, lfo: lfoE, filter: fE };
+
+  // Layer 3: 战斗层 (rhythmic + bass)
+  var oscB1 = this.ctx.createOscillator();
+  oscB1.type = 'sawtooth'; oscB1.frequency.value = 110;
+  var oscB2 = this.ctx.createOscillator();
+  oscB2.type = 'square'; oscB2.frequency.value = 55;
+  var gB = this.ctx.createGain(); gB.gain.value = 0;
+  var fB = this.ctx.createBiquadFilter();
+  fB.type = 'lowpass'; fB.frequency.value = 300;
+  // 节奏脉动
+  var lfoB = this.ctx.createOscillator();
+  lfoB.type = 'square'; lfoB.frequency.value = 2.5;
+  var lfoBG = this.ctx.createGain(); lfoBG.gain.value = 0.5;
+  lfoB.connect(lfoBG); lfoBG.connect(gB.gain);
+  oscB1.connect(gB); oscB2.connect(gB);
+  gB.connect(fB); fB.connect(this.musicGain);
+  oscB1.start(t); oscB2.start(t); lfoB.start(t);
+  this.musicNodes.battle = { oscs: [oscB1, oscB2], gain: gB, lfo: lfoB, filter: fB };
+
+  // Layer 4: Boss层 (史诗)
+  var oscBo1 = this.ctx.createOscillator();
+  oscBo1.type = 'sawtooth'; oscBo1.frequency.value = 82.4;
+  var oscBo2 = this.ctx.createOscillator();
+  oscBo2.type = 'square'; oscBo2.frequency.value = 41.2;
+  var gBo = this.ctx.createGain(); gBo.gain.value = 0;
+  var fBo = this.ctx.createBiquadFilter();
+  fBo.type = 'lowpass'; fBo.frequency.value = 400;
+  var lfoBo = this.ctx.createOscillator();
+  lfoBo.type = 'sine'; lfoBo.frequency.value = 0.2;
+  var lfoBoG = this.ctx.createGain(); lfoBoG.gain.value = 0.3;
+  lfoBo.connect(lfoBoG); lfoBoG.connect(gBo.gain);
+  oscBo1.connect(gBo); oscBo2.connect(gBo);
+  gBo.connect(fBo); fBo.connect(this.musicGain);
+  oscBo1.start(t); oscBo2.start(t); lfoBo.start(t);
+  this.musicNodes.boss = { oscs: [oscBo1, oscBo2], gain: gBo, lfo: lfoBo, filter: fBo };
+
+  // 默认：环境层开启
+  this.musicState = 'ambient';
+  this._setMusicLayer('ambient', 1.0, 0);
+  this._setMusicLayer('explore', 0, 0);
+  this._setMusicLayer('battle', 0, 0);
+  this._setMusicLayer('boss', 0, 0);
+};
+
+AudioManager.prototype._setMusicLayer = function(layer, targetVol, fadeTime) {
+  var node = this.musicNodes[layer];
+  if (!node) { return; }
+  var t = this.ctx.currentTime;
+  node.gain.gain.setTargetAtTime(targetVol, t, fadeTime * 0.3 + 0.1);
+};
+
+AudioManager.prototype.setMusicState = function(state) {
+  if (state === this.musicTarget) { return; }
+  this.musicTarget = state;
+  this.musicFadeTime = this.musicFadeDuration;
+  this.musicFadeDuration = (state === 'battle' || state === 'boss') ? 0.5 : 1.5;
+};
+
+AudioManager.prototype._updateMusic = function(dt) {
+  if (!this._ensure() || !this.musicNodes.ambient) { return; }
+  if (this.musicFadeTime > 0 && this.musicTarget !== this.musicState) {
+    this.musicFadeTime -= dt;
+    // Cross-fade
+    var fadeOut = this.musicState;
+    var fadeIn = this.musicTarget;
+    var progress = 1 - (this.musicFadeTime / this.musicFadeDuration);
+    this._setMusicLayer(fadeOut, Math.max(0, 1 - progress), 0.05);
+    this._setMusicLayer(fadeIn, Math.min(1, progress), 0.05);
+    if (this.musicFadeTime <= 0) {
+      this._setMusicLayer(fadeOut, 0, 0.1);
+      this._setMusicLayer(fadeIn, 1, 0.1);
+      this.musicState = this.musicTarget;
+    }
+  }
+};
+
+// ============ 空间音效 ============
+AudioManager.prototype.playSpatial = function(type, x, y) {
+  // 根据位置计算立体声pan
+  if (!this._ensure() || this.muted) { return; }
+  var pan = U.cl((x - CFG.BW / 2) / (CFG.BW / 2), -1, 1);
+  var dist = Math.abs(x - (CFG.PA.x + 30)) / CFG.BW;
+  var volMul = Math.max(0.2, 1 - dist);
+
+  var t = this.ctx.currentTime;
+  var panner = this.ctx.createStereoPanner();
+  panner.pan.value = pan;
+  var g = this.ctx.createGain();
+  g.gain.value = volMul;
+  panner.connect(g); g.connect(this.sfxGain);
+
+  this._playTone(200, 'square', 0.06, 0.05 * volMul, g, true, 50);
+};
+
+// 旧接口兼容
+AudioManager.prototype.play = function(type) {
+  switch (type) {
+    case 'shoot': this.shoot(); break;
+    case 'hit': this.hit(); break;
+    case 'explosion': this.explode(); break;
+    case 'powerup': this.powerup(); break;
+    case 'warning': this.bossWarning(); break;
+    case 'dash': this.dash(); break;
+    case 'bomb': this.bomb(); break;
+  }
+};
+
+// ============ 清理 ============
+AudioManager.prototype.stopAll = function() {
+  // 停止环境音
+  if (this.envNodes) {
+    for (var k in this.envNodes) {
+      var n = this.envNodes[k];
+      if (n.osc) { try { n.osc.stop(); } catch(e) {} }
+      if (n.lfo) { try { n.lfo.stop(); } catch(e) {} }
+    }
+    this.envNodes = null;
+  }
+  // 停止音乐
+  if (this.musicNodes.ambient) {
+    for (var mk in this.musicNodes) {
+      var mn = this.musicNodes[mk];
+      if (mn.oscs) {
+        for (var oi = 0; oi < mn.oscs.length; oi++) { try { mn.oscs[oi].stop(); } catch(e) {} }
+      }
+      if (mn.lfo) { try { mn.lfo.stop(); } catch(e) {} }
+    }
+    this.musicNodes = {};
+  }
+};
 
 // ========== CAMERA ==========
 function Camera() {
   this.shakeIntensity = 0; this.shakeDuration = 0; this.shakeTimer = 0;
   this.ox = 0; this.oy = 0;
+  this.targetX = 0; this.targetY = 0;
 }
 Camera.prototype.shake = function(intensity, duration) {
   this.shakeIntensity = Math.max(this.shakeIntensity, intensity);
@@ -266,9 +764,17 @@ Camera.prototype.update = function(dt) {
     this.shakeTimer += dt * 1000;
     var progress = this.shakeTimer / this.shakeDuration;
     var decay = 1 - progress;
-    this.ox = (Math.random() - 0.5) * 2 * this.shakeIntensity * decay;
-    this.oy = (Math.random() - 0.5) * 2 * this.shakeIntensity * decay;
-  } else { this.ox = 0; this.oy = 0; this.shakeIntensity = 0; this.shakeDuration = 0; }
+    // 使用平滑阻尼振动
+    this.ox = Math.sin(progress * 30) * this.shakeIntensity * decay * 0.8;
+    this.oy = Math.cos(progress * 27) * this.shakeIntensity * decay * 0.6;
+  } else {
+    // 平滑回归
+    this.ox = U.lerp(this.ox, 0, dt * 8);
+    this.oy = U.lerp(this.oy, 0, dt * 8);
+    if (Math.abs(this.ox) < 0.1 && Math.abs(this.oy) < 0.1) {
+      this.ox = 0; this.oy = 0; this.shakeIntensity = 0; this.shakeDuration = 0;
+    }
+  }
 };
 
 // ========== PARTICLE ==========
@@ -276,12 +782,19 @@ function Particle() { this.reset(); }
 Particle.prototype.reset = function() {
   this.x = 0; this.y = 0; this.vx = 0; this.vy = 0;
   this.life = 0; this.maxLife = 0; this.active = false;
-  this.size = 2; this.color = '#fff'; this.opacity = 1; this.gravity = 0;
+  this.size = 2; this.endSize = 0; this.color = '#fff'; this.opacity = 1; this.gravity = 0;
+  this.type = 'default'; // default, glow, trail, flash
+  this.glowColor = ''; this.blur = 0;
 };
-Particle.prototype.init = function(x, y, vx, vy, life, size, color) {
+Particle.prototype.init = function(x, y, vx, vy, life, size, color, opts) {
   this.x = x; this.y = y; this.vx = vx; this.vy = vy;
   this.life = life; this.maxLife = life; this.active = true;
-  this.size = size; this.color = color; this.opacity = 1; this.gravity = 0;
+  this.size = size; this.endSize = (opts && opts.endSize) || 0;
+  this.color = color; this.opacity = 1; this.gravity = 0;
+  this.type = (opts && opts.type) || 'default';
+  this.glowColor = (opts && opts.glowColor) || color;
+  this.blur = (opts && opts.blur) || 0;
+  if (opts && opts.gravity) { this.gravity = opts.gravity; }
 };
 Particle.prototype.update = function(dt) {
   this.life -= dt;
@@ -289,57 +802,303 @@ Particle.prototype.update = function(dt) {
   this.x += this.vx * dt; this.y += this.vy * dt;
   this.vy += this.gravity * dt;
   this.opacity = this.life / this.maxLife;
+  // 速度衰减
+  this.vx *= 0.98;
+  this.vy *= 0.98;
 };
 Particle.prototype.render = function(ctx) {
-  ctx.globalAlpha = this.opacity;
-  ctx.fillStyle = this.color;
-  ctx.shadowColor = this.color;
-  ctx.shadowBlur = this.size * 2;
-  ctx.fillRect(this.x - this.size / 2, this.y - this.size / 2, this.size, this.size);
-  ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+  var alpha = this.opacity;
+  var currentSize = this.endSize ? this.size + (this.endSize - this.size) * (1 - this.opacity) : this.size;
+  ctx.globalAlpha = alpha;
+  if (this.type === 'glow') {
+    var grad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, currentSize);
+    grad.addColorStop(0, this.color);
+    grad.addColorStop(0.5, this.glowColor);
+    grad.addColorStop(1, 'transparent');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(this.x, this.y, currentSize, 0, Math.PI * 2); ctx.fill();
+  } else if (this.type === 'trail') {
+    ctx.fillStyle = this.color;
+    ctx.shadowColor = this.glowColor;
+    ctx.shadowBlur = this.blur || currentSize * 3;
+    ctx.fillRect(this.x - currentSize / 2, this.y - currentSize / 2, currentSize, currentSize);
+    ctx.shadowBlur = 0;
+  } else if (this.type === 'shockwave') {
+    var progress = 1 - this.opacity;
+    var r = this.ringRadius + (this.endSize - this.ringRadius) * progress;
+    ctx.strokeStyle = this.color;
+    ctx.lineWidth = 3 * (1 - progress);
+    ctx.shadowColor = this.glowColor;
+    ctx.shadowBlur = 8 * (1 - progress);
+    ctx.beginPath(); ctx.arc(this.x, this.y, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.shadowBlur = 0;
+    // 内层光环
+    ctx.strokeStyle = 'rgba(255,255,255,' + (alpha * 0.5) + ')';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(this.x, this.y, r * 0.8, 0, Math.PI * 2); ctx.stroke();
+  } else if (this.type === 'energyRing') {
+    var pr = 1 - this.opacity;
+    var er = this.ringRadius + (this.endSize - this.ringRadius) * pr;
+    ctx.strokeStyle = this.color;
+    ctx.lineWidth = 2 * (1 - pr);
+    ctx.shadowColor = this.glowColor;
+    ctx.shadowBlur = 6 * (1 - pr);
+    ctx.beginPath(); ctx.arc(this.x, this.y, er, 0, Math.PI * 2); ctx.stroke();
+    ctx.shadowBlur = 0;
+  } else {
+    ctx.fillStyle = this.color;
+    ctx.shadowColor = this.color;
+    ctx.shadowBlur = currentSize * 2;
+    ctx.fillRect(this.x - currentSize / 2, this.y - currentSize / 2, currentSize, currentSize);
+    ctx.shadowBlur = 0;
+  }
+  ctx.globalAlpha = 1;
 };
 
 // ========== PARTICLE SYSTEM ==========
 function ParticleSystem() {
   this.particles = [];
-  this.pool = new Pool(function() { return new Particle(); }, function(p) { p.reset(); }, 500);
+  this.pool = new Pool(function() { return new Particle(); }, function(p) { p.reset(); }, 800);
+  this.envParticles = [];
+  this.envTimer = 0;
+  this.maxParticles = 600;
 }
 ParticleSystem.prototype.emit = function(x, y, count, cfg) {
   for (var i = 0; i < count; i++) {
+    if (this.particles.length >= this.maxParticles) { break; }
     var p = this.pool.acquire();
     var angle = cfg.angle !== undefined ? cfg.angle : U.r(0, Math.PI * 2);
     var speed = cfg.speed || U.r(50, 200);
     var spread = cfg.spread || 0;
     var a = angle + U.r(-spread, spread);
+    var opts = { type: cfg.type || 'default', glowColor: cfg.glowColor, blur: cfg.blur, endSize: cfg.endSize, gravity: cfg.gravity };
     p.init(x, y, Math.cos(a) * speed, Math.sin(a) * speed,
-      cfg.life || U.r(0.2, 0.6), cfg.size || U.r(1, 3), cfg.color || '#ff4444');
-    if (cfg.gravity) { p.gravity = cfg.gravity; }
+      cfg.life || U.r(0.2, 0.6), cfg.size || U.r(1, 3), cfg.color || '#ff4444', opts);
     this.particles.push(p);
   }
 };
+
+// 引擎尾焰粒子
+ParticleSystem.prototype.emitEngine = function(x, y, vx, vy, isPlayer) {
+  if (this.particles.length >= this.maxParticles) { return; }
+  var count = isPlayer ? 3 : 1;
+  for (var i = 0; i < count; i++) {
+    var p = this.pool.acquire();
+    var sx = x + U.r(-3, 3), sy = y + U.r(-2, 2);
+    var svx = vx * 0.5 + U.r(-20, 20), svy = vy * 0.5 + U.r(-15, 15);
+    var color = isPlayer ? ['#00ccff', '#0088ff', '#00aaff'][U.ri(0, 2)] : ['#ff6644', '#ff4422', '#ff5533'][U.ri(0, 2)];
+    p.init(sx, sy, svx, svy, U.r(0.15, 0.4), U.r(1.5, 3.5), color,
+      { type: 'glow', glowColor: isPlayer ? '#004488' : '#441100', endSize: 0.5 });
+    this.particles.push(p);
+  }
+};
+
+// 飞行轨迹粒子
+ParticleSystem.prototype.emitTrail = function(x, y, color) {
+  if (this.particles.length >= this.maxParticles) { return; }
+  for (var i = 0; i < 2; i++) {
+    var p = this.pool.acquire();
+    p.init(x + U.r(-2, 2), y + U.r(-2, 2), U.r(-5, 5), U.r(-5, 5), U.r(0.3, 0.6), U.r(1, 2.5), color,
+      { type: 'trail', glowColor: color, blur: 6, endSize: 0.3 });
+    this.particles.push(p);
+  }
+};
+
+// 爆炸粒子接口（第二阶段接入）
+ParticleSystem.prototype.createExplosion = function(x, y, type) {
+  var cfg;
+  switch (type) {
+    case 'small':
+      cfg = { count: 6, color: '#ff8844', speed: 140, spread: Math.PI * 2, life: 0.35, size: 2.5 };
+      break;
+    case 'medium':
+      cfg = { count: 14, color: '#ff6644', speed: 200, spread: Math.PI * 2, life: 0.55, size: 3.5 };
+      break;
+    case 'large':
+      cfg = { count: 30, color: '#ff4466', speed: 280, spread: Math.PI * 2, life: 0.75, size: 4.5 };
+      break;
+    case 'boss':
+      cfg = { count: 50, color: '#ff2244', speed: 350, spread: Math.PI * 2, life: 1.0, size: 6 };
+      break;
+    default:
+      cfg = { count: 10, color: '#ffaa44', speed: 160, spread: Math.PI * 2, life: 0.45, size: 3 };
+  }
+
+  // 第一阶段：白色能量闪光
+  this.emit(x, y, cfg.count, {
+    color: '#ffffff', speed: cfg.speed * 0.3, spread: cfg.spread, life: cfg.life * 0.2,
+    size: cfg.size * 2, type: 'glow', glowColor: '#ffffff', endSize: 0
+  });
+
+  // 第二阶段：火焰粒子
+  this.emit(x, y, cfg.count, cfg);
+
+  // 金属碎片
+  this.emit(x, y, Math.floor(cfg.count * 0.6), {
+    color: cfg.color, speed: cfg.speed * 0.7, spread: cfg.spread, life: cfg.life * 0.8,
+    size: cfg.size * 0.6, type: 'trail', glowColor: '#ffaa44', blur: 4, gravity: 80
+  });
+
+  // 第三阶段：光晕粒子（缓慢扩散）
+  this.emit(x, y, Math.floor(cfg.count / 2), {
+    color: '#ffffff', speed: cfg.speed * 0.4, spread: cfg.spread, life: cfg.life * 0.7,
+    size: cfg.size * 1.8, type: 'glow', glowColor: cfg.color, endSize: cfg.size * 3
+  });
+
+  // 残留火花
+  this.emit(x, y, Math.floor(cfg.count * 0.3), {
+    color: '#ffd700', speed: cfg.speed * 0.5, spread: cfg.spread, life: cfg.life * 0.6,
+    size: cfg.size * 0.7, type: 'trail', glowColor: '#ffaa00', blur: 6, gravity: 30
+  });
+};
+
+// 冲击波效果
+ParticleSystem.prototype.emitShockwave = function(x, y, radius, color) {
+  if (this.particles.length >= this.maxParticles) { return; }
+  var p = this.pool.acquire();
+  p.init(x, y, 0, 0, 0.4, radius, color || '#ffffff', {
+    type: 'shockwave', glowColor: color || '#ffffff', blur: 0, endSize: radius * 2.5
+  });
+  p.ringRadius = radius;
+  this.particles.push(p);
+};
+
+// 枪口闪光
+ParticleSystem.prototype.emitMuzzleFlash = function(x, y, color) {
+  if (this.particles.length >= this.maxParticles) { return; }
+  // 中心闪光
+  for (var i = 0; i < 4; i++) {
+    var p = this.pool.acquire();
+    var a = U.r(0, Math.PI * 2);
+    var spd = U.r(30, 80);
+    p.init(x, y, Math.cos(a) * spd, Math.sin(a) * spd, U.r(0.05, 0.12), U.r(2, 5), '#ffffff',
+      { type: 'glow', glowColor: color || '#00ccff', endSize: 0.5 });
+    this.particles.push(p);
+  }
+  // 光晕扩散
+  this.emit(x, y, 3, {
+    color: color || '#00ccff', speed: 10, spread: Math.PI * 2, life: 0.1,
+    size: 4, type: 'glow', glowColor: color || '#00ccff', endSize: 8
+  });
+};
+
+// 命中火花
+ParticleSystem.prototype.emitHitSpark = function(x, y, color) {
+  this.emit(x, y, 4, {
+    color: '#ffffff', speed: 120, spread: Math.PI * 0.6, life: 0.15,
+    size: 1.5, type: 'trail', glowColor: color || '#ffaa44', blur: 4
+  });
+  this.emit(x, y, 2, {
+    color: color || '#ffaa44', speed: 60, spread: Math.PI * 0.4, life: 0.2,
+    size: 2, type: 'glow', glowColor: color || '#ffaa44', endSize: 4
+  });
+};
+
+// 能量波纹
+ParticleSystem.prototype.emitEnergyRing = function(x, y, size, color) {
+  if (this.particles.length >= this.maxParticles) { return; }
+  var p = this.pool.acquire();
+  p.init(x, y, 0, 0, 0.25, size, color || '#00ccff', {
+    type: 'energyRing', glowColor: color || '#00ccff', blur: 0, endSize: size * 3
+  });
+  p.ringRadius = size;
+  this.particles.push(p);
+};
+
+// 子弹类型效果接口
+ParticleSystem.prototype.createBulletEffect = function(type, x, y, color) {
+  switch (type) {
+    case 'laser':
+      // 细长光束拖尾
+      this.emit(x, y, 1, { color: color || '#00ccff', speed: 5, spread: 0, life: 0.15, size: 2, type: 'glow', glowColor: color || '#00ccff', endSize: 6 });
+      break;
+    case 'plasma':
+      // 球状电浆
+      this.emit(x, y, 2, { color: color || '#ff00ff', speed: 30, spread: Math.PI * 0.3, life: 0.2, size: 3, type: 'glow', glowColor: color || '#ff00ff', endSize: 1 });
+      break;
+    case 'missile':
+      // 火焰尾焰
+      this.emit(x, y, 2, { color: '#ff8800', speed: 40, spread: Math.PI * 0.4, life: 0.25, size: 2.5, type: 'trail', glowColor: '#ff6600', blur: 5, endSize: 0.5 });
+      break;
+    default:
+      this.emitTrail(x, y, color || '#00ccff');
+  }
+};
+
+// 环境粒子
+ParticleSystem.prototype._updateEnv = function(dt) {
+  this.envTimer -= dt;
+  if (this.envTimer <= 0) {
+    this.envTimer = U.r(0.3, 0.8);
+    if (this.envParticles.length < 30) {
+      this.envParticles.push({
+        x: U.r(0, CFG.BW), y: U.r(0, CFG.BH),
+        vx: U.r(-15, -5), vy: U.r(-3, 3),
+        life: U.r(3, 8), maxLife: 0, size: U.r(0.5, 2),
+        color: ['#aaccff','#ddeeff','#eeddff','#99bbff','#ffffff'][U.ri(0, 4)],
+        twinkleOff: U.r(0, Math.PI * 2), twinkleSpd: U.r(0.5, 2)
+      });
+      this.envParticles[this.envParticles.length - 1].maxLife = this.envParticles[this.envParticles.length - 1].life;
+    }
+  }
+  for (var i = this.envParticles.length - 1; i >= 0; i--) {
+    var ep = this.envParticles[i];
+    ep.life -= dt;
+    if (ep.life <= 0) { this.envParticles.splice(i, 1); continue; }
+    ep.x += ep.vx * dt;
+    ep.y += ep.vy * dt;
+    if (ep.x < -10 || ep.x > CFG.BW + 10 || ep.y < -10 || ep.y > CFG.BH + 10) { this.envParticles.splice(i, 1); }
+  }
+};
+
+ParticleSystem.prototype._renderEnv = function(ctx, time) {
+  for (var i = 0; i < this.envParticles.length; i++) {
+    var ep = this.envParticles[i];
+    var alpha = (ep.life / ep.maxLife) * 0.5;
+    var twinkle = 0.5 + 0.5 * Math.sin(time * ep.twinkleSpd + ep.twinkleOff);
+    ctx.globalAlpha = alpha * twinkle;
+    ctx.fillStyle = ep.color;
+    ctx.shadowColor = ep.color;
+    ctx.shadowBlur = ep.size * 4;
+    ctx.fillRect(ep.x - ep.size / 2, ep.y - ep.size / 2, ep.size, ep.size);
+    ctx.shadowBlur = 0;
+  }
+  ctx.globalAlpha = 1;
+};
+
 ParticleSystem.prototype.update = function(dt) {
   for (var i = this.particles.length - 1; i >= 0; i--) {
     this.particles[i].update(dt);
     if (!this.particles[i].active) { this.pool.release(this.particles[i]); this.particles.splice(i, 1); }
   }
+  this._updateEnv(dt);
 };
-ParticleSystem.prototype.render = function(ctx) {
+ParticleSystem.prototype.render = function(ctx, time) {
+  this._renderEnv(ctx, time || 0);
   for (var i = 0; i < this.particles.length; i++) { this.particles[i].render(ctx); }
 };
 ParticleSystem.prototype.clear = function() {
   for (var i = 0; i < this.particles.length; i++) { this.pool.release(this.particles[i]); }
   this.particles.length = 0;
+  this.envParticles.length = 0;
 };
 
-// ========== STARFIELD (横版：星星向左移动) ==========
+// ========== STARFIELD (横版：深空多层环境) ==========
 function StarField() {
+  // 第1层：远景微星 - 最深处的星空
   this.layers = [
-    { stars: [], count: 200, speed: 15, size: 0.8, alpha: 0.5 },
-    { stars: [], count: 100, speed: 40, size: 1.4, alpha: 0.7 },
-    { stars: [], count: 50, speed: 80, size: 2.2, alpha: 0.9 }
+    { stars: [], count: 250, speed: 8,  size: 0.6, alpha: 0.45, colors: ['#aaccff','#ccddff','#8899dd','#99aadd','#ffffff'] },
+    { stars: [], count: 150, speed: 22, size: 1.1, alpha: 0.6,  colors: ['#ccddff','#ddeeff','#ffffff','#aaccff','#eeddff'] },
+    { stars: [], count: 80,  speed: 50, size: 1.8, alpha: 0.75, colors: ['#ffffff','#ddeeff','#ffe8ff','#ccddff','#ffffff'] },
+    { stars: [], count: 30,  speed: 100,size: 2.5, alpha: 0.9,  colors: ['#ffffff','#ffffff','#eeddff','#ffffff','#ddeeff'] }
   ];
   this._initStars();
   this.nebulaCanvas = this._createNebula();
+  this.nebulaOffX = 0;
+  this.nebulaSpeed = 3;
+  // 星系结构
+  this.cosmicStructures = this._createCosmicStructures();
+  this.planets = this._createPlanets();
 }
 StarField.prototype._initStars = function() {
   for (var li = 0; li < this.layers.length; li++) {
@@ -347,28 +1106,97 @@ StarField.prototype._initStars = function() {
     for (var i = 0; i < layer.count; i++) {
       layer.stars.push({
         x: U.r(0, CFG.BW), y: U.r(0, CFG.BH),
-        brightness: U.r(0.3, 1), twinkleSpeed: U.r(0.5, 2), twinkleOffset: U.r(0, Math.PI * 2)
+        brightness: U.r(0.3, 1), twinkleSpeed: U.r(0.3, 1.8), twinkleOffset: U.r(0, Math.PI * 2),
+        colorIdx: U.ri(0, layer.colors.length - 1)
       });
     }
   }
 };
 StarField.prototype._createNebula = function() {
   var c = document.createElement('canvas');
-  c.width = CFG.BW; c.height = CFG.BH;
+  c.width = CFG.BW * 2; c.height = CFG.BH;
   var ctx = c.getContext('2d');
-  var hues = [200, 260, 300, 180, 30];
-  for (var i = 0; i < 5; i++) {
-    var x = U.r(0, CFG.BW), y = U.r(0, CFG.BH), r = U.r(60, 150);
-    var grad = ctx.createRadialGradient(x, y, 0, x, y, r);
-    var h = hues[i];
-    grad.addColorStop(0, 'hsla(' + h + ',80%,30%,0.06)');
-    grad.addColorStop(0.5, 'hsla(' + h + ',60%,20%,0.03)');
+  // 多片星云
+  var nebulas = [
+    { x: 100, y: 120, r: 180, h: 260, hl: 250 }, // 紫色星云
+    { x: 500, y: 300, r: 220, h: 200, hl: 220 }, // 蓝色星云
+    { x: 900, y: 80,  r: 160, h: 280, hl: 300 }, // 紫蓝星云
+    { x: 1300, y: 250, r: 200, h: 180, hl: 200 }, // 青蓝星云
+    { x: 300, y: 380, r: 140, h: 30,  hl: 50  }, // 暖色星云
+    { x: 1100, y: 150, r: 170, h: 240, hl: 260 }, // 深紫星云
+  ];
+  for (var i = 0; i < nebulas.length; i++) {
+    var n = nebulas[i];
+    var grad = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, n.r);
+    grad.addColorStop(0, 'hsla(' + n.h + ',70%,25%,0.07)');
+    grad.addColorStop(0.3, 'hsla(' + n.hl + ',50%,18%,0.04)');
+    grad.addColorStop(0.6, 'hsla(' + n.h + ',40%,10%,0.02)');
     grad.addColorStop(1, 'transparent');
-    ctx.fillStyle = grad; ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    ctx.fillStyle = grad; ctx.fillRect(n.x - n.r, n.y - n.r, n.r * 2, n.r * 2);
   }
+  // 添加星云丝状结构
+  ctx.globalAlpha = 0.03;
+  for (var j = 0; j < 30; j++) {
+    var sx = U.r(0, CFG.BW * 2), sy = U.r(0, CFG.BH);
+    ctx.strokeStyle = 'hsla(' + U.r(200, 300) + ',60%,40%,0.5)';
+    ctx.lineWidth = U.r(1, 4);
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    var cx = sx + U.r(-80, 80), cy = sy + U.r(-40, 40);
+    ctx.quadraticCurveTo(cx, cy, sx + U.r(-100, 100), sy + U.r(-30, 30));
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
   return c;
 };
+StarField.prototype._createCosmicStructures = function() {
+  var structures = [];
+  // 远处星系尘埃
+  for (var i = 0; i < 15; i++) {
+    structures.push({
+      x: U.r(0, CFG.BW), y: U.r(0, CFG.BH),
+      size: U.r(3, 8),
+      speed: U.r(1, 4),
+      alpha: U.r(0.15, 0.4),
+      color: ['#334466', '#445577', '#334455', '#553366', '#446688'][U.ri(0, 4)],
+      twinkleSpeed: U.r(0.3, 1.2), twinkleOffset: U.r(0, Math.PI * 2)
+    });
+  }
+  return structures;
+};
+StarField.prototype._createPlanets = function() {
+  var planets = [];
+  // 几个遥远星球
+  var planetDefs = [
+    { x: 650, y: 60, r: 22, color: '#1a3355', ring: true,  ringColor: '#334466' },
+    { x: 200, y: 380, r: 15, color: '#332244', ring: false, ringColor: '' },
+    { x: 750, y: 350, r: 18, color: '#223344', ring: true,  ringColor: '#445577' },
+    { x: 400, y: 100, r: 10, color: '#442233', ring: false, ringColor: '' },
+  ];
+  for (var i = 0; i < planetDefs.length; i++) {
+    var pd = planetDefs[i];
+    planets.push({
+      x: pd.x, y: pd.y, r: pd.r, color: pd.color,
+      ring: pd.ring, ringColor: pd.ringColor,
+      speed: U.r(1.5, 3), atmosphere: U.r(0, Math.PI * 2),
+      craters: this._generateCraters(pd.r, pd.color)
+    });
+  }
+  return planets;
+};
+StarField.prototype._generateCraters = function(r, color) {
+  var craters = [];
+  var num = Math.floor(r / 2);
+  for (var i = 0; i < num; i++) {
+    var angle = U.r(0, Math.PI * 2);
+    var dist = U.r(0, r * 0.7);
+    craters.push({ angle: angle, dist: dist, size: U.r(1, r * 0.25) });
+  }
+  return craters;
+};
 StarField.prototype.update = function(dt) {
+  this.nebulaOffX -= this.nebulaSpeed * dt;
+  if (this.nebulaOffX < -CFG.BW) { this.nebulaOffX += CFG.BW; }
   for (var li = 0; li < this.layers.length; li++) {
     var layer = this.layers[li];
     for (var i = 0; i < layer.stars.length; i++) {
@@ -377,11 +1205,52 @@ StarField.prototype.update = function(dt) {
       if (s.x < 0) { s.x = CFG.BW; s.y = U.r(0, CFG.BH); }
     }
   }
+  for (var j = 0; j < this.cosmicStructures.length; j++) {
+    var cs = this.cosmicStructures[j];
+    cs.x -= cs.speed * dt;
+    if (cs.x < -10) { cs.x = CFG.BW + 10; cs.y = U.r(0, CFG.BH); }
+  }
+  for (var k = 0; k < this.planets.length; k++) {
+    var p = this.planets[k];
+    p.x -= p.speed * dt;
+    if (p.x < -p.r * 2) { p.x = CFG.BW + p.r * 2; p.y = U.r(40, CFG.BH - 40); }
+  }
 };
 StarField.prototype.render = function(ctx, time) {
-  ctx.fillStyle = CFG.CL.bg;
+  // 深空底色
+  var bgGrad = ctx.createLinearGradient(0, 0, 0, CFG.BH);
+  bgGrad.addColorStop(0, '#020210');
+  bgGrad.addColorStop(0.3, '#050520');
+  bgGrad.addColorStop(0.6, '#030318');
+  bgGrad.addColorStop(1, '#010108');
+  ctx.fillStyle = bgGrad;
   ctx.fillRect(0, 0, CFG.BW, CFG.BH);
-  ctx.drawImage(this.nebulaCanvas, 0, 0);
+
+  // 星云流动
+  ctx.globalAlpha = 0.5;
+  ctx.drawImage(this.nebulaCanvas, this.nebulaOffX, 0, CFG.BW, CFG.BH, 0, 0, CFG.BW, CFG.BH);
+  ctx.drawImage(this.nebulaCanvas, this.nebulaOffX + CFG.BW, 0, CFG.BW, CFG.BH, 0, 0, CFG.BW, CFG.BH);
+  ctx.globalAlpha = 1;
+
+  // 宇宙尘埃
+  for (var j = 0; j < this.cosmicStructures.length; j++) {
+    var cs = this.cosmicStructures[j];
+    var twinkle = 0.5 + 0.5 * Math.sin(time * cs.twinkleSpeed + cs.twinkleOffset);
+    ctx.globalAlpha = cs.alpha * twinkle;
+    ctx.fillStyle = cs.color;
+    ctx.beginPath();
+    ctx.arc(cs.x, cs.y, cs.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // 星球
+  for (var k = 0; k < this.planets.length; k++) {
+    var p = this.planets[k];
+    this._renderPlanet(ctx, p, time);
+  }
+
+  // 四层星空
   for (var li = 0; li < this.layers.length; li++) {
     var layer = this.layers[li];
     ctx.globalAlpha = layer.alpha;
@@ -389,16 +1258,61 @@ StarField.prototype.render = function(ctx, time) {
       var s = layer.stars[i];
       var twinkle = 0.5 + 0.5 * Math.sin(time * s.twinkleSpeed + s.twinkleOffset);
       var alpha = s.brightness * twinkle;
-      ctx.fillStyle = 'rgba(200,220,255,' + alpha + ')';
-      ctx.shadowColor = 'rgba(150,200,255,' + (alpha * 0.5) + ')';
-      ctx.shadowBlur = layer.size * 2;
-      ctx.fillRect(s.x - layer.size / 2, s.y - layer.size / 2, layer.size, layer.size);
+      var starColor = layer.colors[s.colorIdx];
+      ctx.fillStyle = starColor;
+      ctx.shadowColor = starColor;
+      ctx.shadowBlur = layer.size * 2.5;
+      var sz = layer.size * (li === 0 ? 1 : (0.8 + twinkle * 0.4));
+      ctx.fillRect(s.x - sz / 2, s.y - sz / 2, sz, sz);
     }
     ctx.shadowBlur = 0;
   }
   ctx.globalAlpha = 1;
-  ctx.fillStyle = 'rgba(0,0,0,0.03)';
+
+  // 扫描线效果
+  ctx.fillStyle = 'rgba(0,0,0,0.02)';
   for (var y = 0; y < CFG.BH; y += 3) { ctx.fillRect(0, y, CFG.BW, 1); }
+};
+
+StarField.prototype._renderPlanet = function(ctx, p, time) {
+  ctx.save();
+  ctx.globalAlpha = 0.5;
+  // 星球主体
+  var grad = ctx.createRadialGradient(p.x - p.r * 0.3, p.y - p.r * 0.3, p.r * 0.1, p.x, p.y, p.r);
+  grad.addColorStop(0, '#556688');
+  grad.addColorStop(0.5, p.color);
+  grad.addColorStop(1, '#050510');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+  ctx.fill();
+  // 大气层光晕
+  ctx.strokeStyle = 'rgba(100,140,200,0.15)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  // 环形山
+  for (var i = 0; i < p.craters.length; i++) {
+    var cr = p.craters[i];
+    var cx = p.x + Math.cos(cr.angle) * cr.dist;
+    var cy = p.y + Math.sin(cr.angle) * cr.dist;
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath();
+    ctx.arc(cx, cy, cr.size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
+  // 光环
+  if (p.ring) {
+    ctx.strokeStyle = p.ringColor;
+    ctx.globalAlpha = 0.2;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.ellipse(p.x, p.y, p.r * 1.6, p.r * 0.45, -0.4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
 };
 
 // ========== ENTITY BASE ==========
@@ -455,15 +1369,30 @@ Bullet.prototype.update = function(dt) {
   if (this.x < pa.x - 20 || this.x > pa.x + pa.w + 20 || this.y < pa.y - 20 || this.y > pa.y + pa.h + 20) { this.active = false; }
 };
 Bullet.prototype.render = function(ctx) {
+  // 拖尾
   for (var i = 0; i < this.trail.length; i++) {
     var t = this.trail[i];
-    ctx.globalAlpha = t.life / 0.08 * 0.5;
+    var alpha = t.life / 0.08 * 0.6;
+    ctx.globalAlpha = alpha;
     ctx.fillStyle = this.color;
+    ctx.shadowColor = this.color;
+    ctx.shadowBlur = this.isEnemy ? 4 : 6;
     ctx.fillRect(t.x - 2, t.y - 1, 4, 2);
+    ctx.shadowBlur = 0;
   }
   ctx.globalAlpha = this.opacity;
-  ctx.fillStyle = this.color;
-  ctx.shadowColor = this.color; ctx.shadowBlur = 6;
+  // 子弹光晕
+  var glowGrad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.isEnemy ? 6 : 8);
+  glowGrad.addColorStop(0, this.color);
+  glowGrad.addColorStop(0.5, this.color + '88');
+  glowGrad.addColorStop(1, 'transparent');
+  ctx.fillStyle = glowGrad;
+  ctx.beginPath();
+  ctx.arc(this.x, this.y, this.isEnemy ? 6 : 8, 0, Math.PI * 2);
+  ctx.fill();
+  // 子弹核心
+  ctx.fillStyle = '#ffffff';
+  ctx.shadowColor = this.color; ctx.shadowBlur = this.isEnemy ? 4 : 8;
   ctx.fillRect(this.x - this.width / 2, this.y - this.height / 2, this.width, this.height);
   ctx.shadowBlur = 0; ctx.globalAlpha = 1;
 };
@@ -488,6 +1417,12 @@ Player.prototype.reset = function() {
   this.dashCooldown = 0; this.dashing = false; this.dashTimer = 0;
   this.dashDX = 0; this.dashDY = 0;
   this.engineFlame = 0; this.flashTimer = 0; this.speed = CFG.PS;
+  // 视觉状态
+  this.tiltAngle = 0; this.targetTilt = 0;
+  this.floatOffset = 0; this.floatSpeed = 1.5;
+  this.prevX = 100; this.prevY = CFG.BH / 2;
+  this.ghostTrail = [];
+  this.trailTimer = 0;
 };
 
 Player.prototype.update = function(dt, input) {
@@ -504,6 +1439,7 @@ Player.prototype.update = function(dt, input) {
   } else {
     var m = input.getMovement();
     this.vx = m.dx * this.speed; this.vy = m.dy * this.speed;
+    this.prevX = this.x; this.prevY = this.y;
     this.x += this.vx * dt; this.y += this.vy * dt;
     var pa = CFG.PA;
     this.x = U.cl(this.x, pa.x + this.width / 2, pa.x + pa.w - this.width / 2);
@@ -512,6 +1448,27 @@ Player.prototype.update = function(dt, input) {
   this.engineFlame += dt * 8;
   this.fireTimer -= dt * 1000;
   this.subWeaponTimer -= dt * 1000;
+
+  // 倾斜动画
+  this.targetTilt = this.vx * 0.004;
+  this.tiltAngle = U.lerp(this.tiltAngle, this.targetTilt, dt * 8);
+  // 上下浮动
+  this.floatOffset = Math.sin(this.engineFlame * 0.5) * 1.5;
+
+  // 更新残影
+  this.trailTimer -= dt;
+  if (this.trailTimer <= 0) {
+    this.trailTimer = 0.03;
+    var speed = Math.hypot(this.vx, this.vy);
+    if (speed > 20) {
+      this.ghostTrail.push({ x: this.x, y: this.y, life: 0.15, alpha: 0.3 });
+      if (this.ghostTrail.length > 8) { this.ghostTrail.shift(); }
+    }
+  }
+  for (var i = this.ghostTrail.length - 1; i >= 0; i--) {
+    this.ghostTrail[i].life -= dt;
+    if (this.ghostTrail[i].life <= 0) { this.ghostTrail.splice(i, 1); }
+  }
 };
 
 Player.prototype.canFire = function() { return this.fireTimer <= 0; };
@@ -547,16 +1504,21 @@ Player.prototype._getWeaponPattern = function() {
   }
 };
 
-Player.prototype.fire = function(bullets) {
+Player.prototype.fire = function(bullets, particles) {
   this.fireTimer = CFG.PFR;
   var patterns = this._getWeaponPattern();
   var speed = CFG.BS;
   for (var i = 0; i < patterns.length; i++) {
     var p = patterns[i];
     var b = bullets.pool.acquire();
-    b.init(this.x + p.ox, this.y + p.oy, p.vx * speed, p.vy * speed, p.damage || 1, p.color || CFG.CL.pb);
+    var bx = this.x + p.ox, by = this.y + p.oy;
+    b.init(bx, by, p.vx * speed, p.vy * speed, p.damage || 1, p.color || CFG.CL.pb);
     b.homing = p.homing || false; b.homingStrength = p.homingStrength || 0;
     bullets.list.push(b);
+  }
+  // 枪口闪光
+  if (particles) {
+    particles.emitMuzzleFlash(this.x + 18, this.y, '#00ccff');
   }
 };
 
@@ -624,51 +1586,220 @@ Player.prototype.useBomb = function() {
 
 Player.prototype.render = function(ctx) {
   if (this.flashTimer > 0 && Math.floor(this.flashTimer * 20) % 2 === 0) { return; }
+
+  // 绘制残影
+  for (var gi = 0; gi < this.ghostTrail.length; gi++) {
+    var g = this.ghostTrail[gi];
+    var ga = g.alpha * (g.life / 0.15);
+    this._renderBody(ctx, g.x, g.y, ga, false);
+  }
+
+  // 闪现效果
   if (this.dashing) {
-    ctx.globalAlpha = 0.5;
-    for (var i = 0; i < 3; i++) {
-      ctx.fillStyle = 'rgba(0,240,255,' + (0.2 - i * 0.05) + ')';
-      ctx.fillRect(this.x - this.width / 2, this.y - this.height / 2 - i * 3, this.width, this.height + i * 6);
+    ctx.globalAlpha = 0.4;
+    for (var i = 0; i < 4; i++) {
+      var dx = (i - 1.5) * 8;
+      this._renderBody(ctx, this.x + dx, this.y, 0.25 - i * 0.05, false);
     }
     ctx.globalAlpha = 1;
   }
+
+  this._renderBody(ctx, this.x, this.y + this.floatOffset, 1, true);
+};
+
+Player.prototype._renderBody = function(ctx, cx, cy, alpha, full) {
   ctx.save();
-  ctx.translate(this.x, this.y);
-  ctx.rotate(-Math.PI / 2); // 旋转使机头朝右
+  ctx.globalAlpha = alpha;
+  ctx.translate(cx, cy);
+  ctx.rotate(this.tiltAngle);
 
-  var fh = 8 + Math.sin(this.engineFlame * 3) * 4;
-  var fg = ctx.createLinearGradient(0, this.height / 2, 0, this.height / 2 + fh);
-  fg.addColorStop(0, '#00f0ff'); fg.addColorStop(0.5, '#0088ff'); fg.addColorStop(1, 'transparent');
-  ctx.fillStyle = fg;
-  ctx.fillRect(-4, this.height / 2 - 2, 8, fh);
-  ctx.fillRect(-2, this.height / 2 - 4, 4, fh + 4);
+  var w = this.width, h = this.height;
+  var hw = w / 2, hh = h / 2;
+  var flame = this.engineFlame;
 
-  var bg = ctx.createLinearGradient(0, -this.height / 2, 0, this.height / 2);
-  bg.addColorStop(0, '#00f0ff'); bg.addColorStop(0.5, '#006688'); bg.addColorStop(1, '#003344');
-  ctx.fillStyle = bg;
-  ctx.shadowColor = '#00f0ff'; ctx.shadowBlur = 10;
+  // === 推进器尾焰 ===
+  var speed = Math.hypot(this.vx, this.vy);
+  var flameLen = 8 + speed * 0.02 + Math.sin(flame * 3) * 5;
+  // 外层光晕
+  ctx.fillStyle = 'rgba(0,180,255,0.15)';
   ctx.beginPath();
-  ctx.moveTo(0, -this.height / 2);
-  ctx.lineTo(-this.width / 2, this.height / 2 - 4);
-  ctx.lineTo(-this.width / 4, this.height / 2 - 8);
-  ctx.lineTo(0, this.height / 2);
-  ctx.lineTo(this.width / 4, this.height / 2 - 8);
-  ctx.lineTo(this.width / 2, this.height / 2 - 4);
+  ctx.ellipse(-hw - 4, 0, flameLen * 0.6, 8, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // 中层火焰
+  var fgOuter = ctx.createLinearGradient(-hw, 0, -hw - flameLen, 0);
+  fgOuter.addColorStop(0, '#00ccff');
+  fgOuter.addColorStop(0.3, '#0088ff');
+  fgOuter.addColorStop(0.7, '#0044cc');
+  fgOuter.addColorStop(1, 'transparent');
+  ctx.fillStyle = fgOuter;
+  ctx.beginPath();
+  ctx.moveTo(-hw - 2, -6);
+  ctx.lineTo(-hw - flameLen, -2 + Math.sin(flame * 5) * 2);
+  ctx.lineTo(-hw - flameLen * 0.8, 0);
+  ctx.lineTo(-hw - flameLen, 2 - Math.sin(flame * 5) * 2);
+  ctx.lineTo(-hw - 2, 6);
+  ctx.closePath();
+  ctx.fill();
+  // 内层核心火焰（白色高热）
+  var fgInner = ctx.createLinearGradient(-hw, 0, -hw - flameLen * 0.6, 0);
+  fgInner.addColorStop(0, '#ffffff');
+  fgInner.addColorStop(0.2, '#aaddff');
+  fgInner.addColorStop(0.6, '#0088ff');
+  fgInner.addColorStop(1, 'transparent');
+  ctx.fillStyle = fgInner;
+  ctx.beginPath();
+  ctx.moveTo(-hw - 2, -3);
+  ctx.lineTo(-hw - flameLen * 0.6, -1 + Math.sin(flame * 7) * 1.5);
+  ctx.lineTo(-hw - flameLen * 0.5, 0);
+  ctx.lineTo(-hw - flameLen * 0.6, 1 - Math.sin(flame * 7) * 1.5);
+  ctx.lineTo(-hw - 2, 3);
+  ctx.closePath();
+  ctx.fill();
+
+  // === 机身主体 ===
+  // 底部暗色金属
+  ctx.fillStyle = '#0a1a2a';
+  ctx.shadowColor = '#004488';
+  ctx.shadowBlur = 4;
+  ctx.beginPath();
+  ctx.moveTo(hw, 0);
+  ctx.lineTo(0, -hh);
+  ctx.lineTo(-hw + 4, -hh * 0.6);
+  ctx.lineTo(-hw, -hh * 0.3);
+  ctx.lineTo(-hw + 2, 0);
+  ctx.lineTo(-hw, hh * 0.3);
+  ctx.lineTo(-hw + 4, hh * 0.6);
+  ctx.lineTo(0, hh);
   ctx.closePath();
   ctx.fill();
   ctx.shadowBlur = 0;
 
-  ctx.fillStyle = '#88eeff'; ctx.shadowColor = '#88eeff'; ctx.shadowBlur = 4;
-  ctx.beginPath(); ctx.ellipse(0, -4, 4, 6, 0, 0, Math.PI * 2); ctx.fill();
+  // 金属装甲层
+  var bodyGrad = ctx.createLinearGradient(0, -hh, 0, hh);
+  bodyGrad.addColorStop(0, '#2a5a8a');
+  bodyGrad.addColorStop(0.2, '#1a3a5a');
+  bodyGrad.addColorStop(0.4, '#3a6a9a');
+  bodyGrad.addColorStop(0.6, '#1a3a5a');
+  bodyGrad.addColorStop(0.8, '#2a5a8a');
+  bodyGrad.addColorStop(1, '#1a3a5a');
+  ctx.fillStyle = bodyGrad;
+  ctx.beginPath();
+  ctx.moveTo(hw - 2, 0);
+  ctx.lineTo(2, -hh + 2);
+  ctx.lineTo(-hw + 7, -hh * 0.5);
+  ctx.lineTo(-hw + 3, -hh * 0.25);
+  ctx.lineTo(-hw + 5, 0);
+  ctx.lineTo(-hw + 3, hh * 0.25);
+  ctx.lineTo(-hw + 7, hh * 0.5);
+  ctx.lineTo(2, hh - 2);
+  ctx.closePath();
+  ctx.fill();
+
+  // 高光边缘
+  ctx.strokeStyle = 'rgba(100,180,255,0.5)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(hw - 2, 0);
+  ctx.lineTo(2, -hh + 2);
+  ctx.lineTo(-hw + 7, -hh * 0.5);
+  ctx.lineTo(-hw + 3, hh * 0.5);
+  ctx.lineTo(2, hh - 2);
+  ctx.closePath();
+  ctx.stroke();
+
+  // 机头科技线条
+  ctx.strokeStyle = 'rgba(0,240,255,0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.shadowColor = '#00f0ff';
+  ctx.shadowBlur = 6;
+  ctx.beginPath();
+  ctx.moveTo(hw - 2, 0);
+  ctx.lineTo(hw - 8, -4);
+  ctx.moveTo(hw - 2, 0);
+  ctx.lineTo(hw - 8, 4);
+  ctx.stroke();
   ctx.shadowBlur = 0;
 
-  if (this.shield > 0) {
-    var sa = 0.2 + 0.1 * Math.sin(this.engineFlame * 2);
-    ctx.strokeStyle = 'rgba(0,204,255,' + sa + ')';
-    ctx.lineWidth = 2; ctx.shadowColor = '#00ccff'; ctx.shadowBlur = 8;
-    ctx.beginPath(); ctx.arc(0, 0, this.width * 0.9, 0, Math.PI * 2); ctx.stroke();
+  // === 能量核心 ===
+  // 核心光晕
+  var coreGlow = ctx.createRadialGradient(0, 0, 1, 0, 0, 8);
+  coreGlow.addColorStop(0, 'rgba(0,240,255,0.8)');
+  coreGlow.addColorStop(0.3, 'rgba(0,180,255,0.4)');
+  coreGlow.addColorStop(0.7, 'rgba(0,100,255,0.1)');
+  coreGlow.addColorStop(1, 'transparent');
+  ctx.fillStyle = coreGlow;
+  ctx.beginPath();
+  ctx.arc(0, 0, 8, 0, Math.PI * 2);
+  ctx.fill();
+  // 核心脉动
+  var pulse = 1 + Math.sin(flame * 4) * 0.2;
+  ctx.fillStyle = '#ffffff';
+  ctx.shadowColor = '#00f0ff';
+  ctx.shadowBlur = 8 * pulse;
+  ctx.beginPath();
+  ctx.arc(0, 0, 2.5 * pulse, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // === 机翼动态光线 ===
+  var wingGlow = 0.5 + Math.sin(flame * 2.5) * 0.3;
+  ctx.strokeStyle = 'rgba(0,200,255,' + wingGlow + ')';
+  ctx.lineWidth = 1;
+  ctx.shadowColor = '#00aaff';
+  ctx.shadowBlur = 4;
+  // 上翼
+  ctx.beginPath();
+  ctx.moveTo(4, -hh * 0.6);
+  ctx.lineTo(-hw + 8, -hh * 0.45);
+  ctx.stroke();
+  // 下翼
+  ctx.beginPath();
+  ctx.moveTo(4, hh * 0.6);
+  ctx.lineTo(-hw + 8, hh * 0.45);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // === 驾驶舱 ===
+  var cockpitGrad = ctx.createLinearGradient(0, -3, 0, 3);
+  cockpitGrad.addColorStop(0, '#88ddff');
+  cockpitGrad.addColorStop(0.5, '#aaefff');
+  cockpitGrad.addColorStop(1, '#4488cc');
+  ctx.fillStyle = cockpitGrad;
+  ctx.shadowColor = '#00ccff';
+  ctx.shadowBlur = 3;
+  ctx.beginPath();
+  ctx.ellipse(4, 0, 4, 2.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // === 能量护盾 ===
+  if (this.shield > 0 && full) {
+    var shieldAlpha = 0.15 + 0.08 * Math.sin(flame * 2);
+    var shieldPulse = 1 + Math.sin(flame * 3) * 0.05;
+    // 外层护盾
+    ctx.strokeStyle = 'rgba(0,200,255,' + shieldAlpha + ')';
+    ctx.lineWidth = 2;
+    ctx.shadowColor = '#00ccff';
+    ctx.shadowBlur = 12;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, hw * 1.2 * shieldPulse, hh * 1.1 * shieldPulse, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    // 内层护盾六边形
+    ctx.strokeStyle = 'rgba(0,180,255,' + (shieldAlpha * 0.7) + ')';
+    ctx.lineWidth = 1;
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    for (var si = 0; si < 6; si++) {
+      var sa = Math.PI / 3 * si - Math.PI / 2;
+      var sr = hw * 1.05 * shieldPulse;
+      var sx = Math.cos(sa) * sr, sy = Math.sin(sa) * sr;
+      ctx[si === 0 ? 'moveTo' : 'lineTo'](sx, sy);
+    }
+    ctx.closePath();
+    ctx.stroke();
     ctx.shadowBlur = 0;
   }
+
   ctx.restore();
 };
 
@@ -685,6 +1816,8 @@ Enemy.prototype.reset = function() {
   this.color = '#ff4466'; this.shape = 'diamond'; this.dropChance = 0.3;
   this.amplitude = 0; this.frequency = 0; this.originX = 0; this.originY = 0;
   this.canShoot = false; this.speed = 180;
+  this.visualTime = 0; this.floatOff = 0;
+  this.hitFlash = 0; // 受击闪白计时器
 };
 
 Enemy.prototype.init = function(type, x, y) {
@@ -711,6 +1844,9 @@ Enemy.prototype.init = function(type, x, y) {
 
 Enemy.prototype.update = function(dt, player) {
   this.time += dt; this.moveTimer += dt; this.fireTimer -= dt * 1000;
+  this.visualTime += dt;
+  this.floatOff = Math.sin(this.visualTime * 2) * 1.5;
+  if (this.hitFlash > 0) { this.hitFlash -= dt; }
   var pa = CFG.PA;
 
   switch (this.movePattern) {
@@ -769,42 +1905,274 @@ Enemy.prototype.fire = function(bullets, player) {
 
 Enemy.prototype.render = function(ctx) {
   ctx.save();
-  ctx.translate(this.x, this.y);
-  ctx.rotate(Math.PI / 2); // 旋转使敌机朝左
-  if (this.maxHp >= 3 && this.hp < this.maxHp) {
-    var bw = this.width, bh = 3;
-    ctx.fillStyle = '#333'; ctx.fillRect(-bw / 2, -this.height / 2 - 8, bw, bh);
-    ctx.fillStyle = '#ff4466'; ctx.fillRect(-bw / 2, -this.height / 2 - 8, bw * (this.hp / this.maxHp), bh);
+  ctx.translate(this.x, this.y + this.floatOff);
+  var w = this.width, h = this.height;
+  var hw = w / 2, hh = h / 2;
+  var t = this.visualTime;
+
+  // 受击闪白效果
+  if (this.hitFlash > 0 && this.hitFlash > 0.03) {
+    ctx.globalAlpha = 0.6;
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = '#ffffff';
+    ctx.shadowBlur = 12;
+    ctx.fillRect(-hw - 2, -hh - 2, w + 4, h + 4);
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
   }
-  ctx.fillStyle = this.color; ctx.shadowColor = this.color; ctx.shadowBlur = 6;
+
+  // 推进器火焰（敌机向右飞，火焰在右侧）
+  var flameLen = 4 + Math.sin(t * 6) * 2;
+  var fg = ctx.createLinearGradient(hw, 0, hw + flameLen, 0);
+  fg.addColorStop(0, this.color);
+  fg.addColorStop(0.5, this.color + '88');
+  fg.addColorStop(1, 'transparent');
+  ctx.fillStyle = fg;
   ctx.beginPath();
-  switch (this.shape) {
-    case 'diamond':
-      ctx.moveTo(0, -this.height / 2); ctx.lineTo(-this.width / 2, 0);
-      ctx.lineTo(0, this.height / 2); ctx.lineTo(this.width / 2, 0);
-      break;
-    case 'hexagon':
-      for (var i = 0; i < 6; i++) {
-        var a = Math.PI / 3 * i - Math.PI / 2, r = this.width / 2;
-        ctx[i === 0 ? 'moveTo' : 'lineTo'](Math.cos(a) * r, Math.sin(a) * r);
-      }
-      break;
-    case 'elongated':
-      ctx.moveTo(0, -this.height / 2); ctx.lineTo(-this.width / 2, -this.height / 4);
-      ctx.lineTo(-this.width / 2, this.height / 2); ctx.lineTo(this.width / 2, this.height / 2);
-      ctx.lineTo(this.width / 2, -this.height / 4);
-      break;
-    case 'spike':
-      ctx.moveTo(0, -this.height / 2); ctx.lineTo(-this.width / 2, this.height / 2);
-      ctx.lineTo(-this.width / 4, 0); ctx.lineTo(0, this.height / 2);
-      ctx.lineTo(this.width / 4, 0); ctx.lineTo(this.width / 2, this.height / 2);
-      break;
-    case 'square':
-      ctx.rect(-this.width / 2, -this.height / 2, this.width, this.height);
-      break;
+  ctx.moveTo(hw, -3);
+  ctx.lineTo(hw + flameLen, -1 + Math.sin(t * 8) * 1);
+  ctx.lineTo(hw + flameLen * 0.7, 0);
+  ctx.lineTo(hw + flameLen, 1 - Math.sin(t * 8) * 1);
+  ctx.lineTo(hw, 3);
+  ctx.closePath();
+  ctx.fill();
+
+  // 根据类型渲染不同视觉
+  switch (this.type) {
+    case 'scout': this._renderScout(ctx, w, h, t); break;
+    case 'fighter': this._renderFighter(ctx, w, h, t); break;
+    case 'tank': this._renderTank(ctx, w, h, t); break;
+    case 'sniper': this._renderSniper(ctx, w, h, t); break;
+    case 'kamikaze': this._renderKamikaze(ctx, w, h, t); break;
+    case 'bomber': this._renderBomber(ctx, w, h, t); break;
+    default: this._renderScout(ctx, w, h, t); break;
   }
-  ctx.closePath(); ctx.fill(); ctx.shadowBlur = 0;
+
+  // 血条
+  if (this.maxHp >= 3 && this.hp < this.maxHp) {
+    var bw = this.width, bh = 2;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(-bw / 2, -hh - 6, bw, bh);
+    ctx.fillStyle = '#ff4466'; ctx.fillRect(-bw / 2, -hh - 6, bw * (this.hp / this.maxHp), bh);
+  }
+
   ctx.restore();
+};
+
+// 侦察机 - 小型无人战斗机
+Enemy.prototype._renderScout = function(ctx, w, h, t) {
+  var hw = w / 2, hh = h / 2;
+  // 金属外壳
+  var grad = ctx.createLinearGradient(0, -hh, 0, hh);
+  grad.addColorStop(0, '#3a1a1a');
+  grad.addColorStop(0.3, '#5a2a2a');
+  grad.addColorStop(0.5, '#7a3a3a');
+  grad.addColorStop(0.7, '#5a2a2a');
+  grad.addColorStop(1, '#3a1a1a');
+  ctx.fillStyle = grad;
+  ctx.shadowColor = '#ff4466';
+  ctx.shadowBlur = 4;
+  ctx.beginPath();
+  ctx.moveTo(-hw, 0);
+  ctx.lineTo(0, -hh);
+  ctx.lineTo(hw, -hh * 0.3);
+  ctx.lineTo(hw, hh * 0.3);
+  ctx.lineTo(0, hh);
+  ctx.closePath();
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  // 红色能量核心
+  var coreGlow = ctx.createRadialGradient(0, 0, 0, 0, 0, 3);
+  coreGlow.addColorStop(0, '#ff4444');
+  coreGlow.addColorStop(0.5, '#ff2222');
+  coreGlow.addColorStop(1, 'transparent');
+  ctx.fillStyle = coreGlow;
+  ctx.beginPath(); ctx.arc(0, 0, 3, 0, Math.PI * 2); ctx.fill();
+  // 边缘光
+  ctx.strokeStyle = 'rgba(255,100,100,0.4)';
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(-hw, 0); ctx.lineTo(0, -hh); ctx.lineTo(hw, -hh * 0.3);
+  ctx.moveTo(hw, hh * 0.3); ctx.lineTo(0, hh); ctx.lineTo(-hw, 0);
+  ctx.stroke();
+};
+
+// 战斗机 - 中型装甲
+Enemy.prototype._renderFighter = function(ctx, w, h, t) {
+  var hw = w / 2, hh = h / 2;
+  var grad = ctx.createLinearGradient(0, -hh, 0, hh);
+  grad.addColorStop(0, '#1a2a4a');
+  grad.addColorStop(0.3, '#2a4a7a');
+  grad.addColorStop(0.5, '#3a5a9a');
+  grad.addColorStop(0.7, '#2a4a7a');
+  grad.addColorStop(1, '#1a2a4a');
+  ctx.fillStyle = grad;
+  ctx.shadowColor = '#4488ff';
+  ctx.shadowBlur = 6;
+  ctx.beginPath();
+  ctx.moveTo(-hw, -hh * 0.2);
+  ctx.lineTo(0, -hh);
+  ctx.lineTo(hw, -hh * 0.5);
+  ctx.lineTo(hw * 0.7, 0);
+  ctx.lineTo(hw, hh * 0.5);
+  ctx.lineTo(0, hh);
+  ctx.lineTo(-hw, hh * 0.2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  // 发光线路
+  ctx.strokeStyle = 'rgba(100,180,255,' + (0.4 + Math.sin(t * 3) * 0.2) + ')';
+  ctx.lineWidth = 1;
+  ctx.shadowColor = '#4488ff';
+  ctx.shadowBlur = 3;
+  ctx.beginPath();
+  ctx.moveTo(0, -hh * 0.5); ctx.lineTo(0, hh * 0.5);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  // 能量核心
+  ctx.fillStyle = '#88ccff';
+  ctx.shadowColor = '#4488ff';
+  ctx.shadowBlur = 4;
+  ctx.beginPath(); ctx.arc(0, 0, 2.5, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+};
+
+// 坦克 - 重型装甲
+Enemy.prototype._renderTank = function(ctx, w, h, t) {
+  var hw = w / 2, hh = h / 2;
+  for (var i = 0; i < 6; i++) {
+    var a = Math.PI / 3 * i - Math.PI / 2;
+    var r = hw;
+    var x = Math.cos(a) * r, y = Math.sin(a) * r;
+    ctx.fillStyle = i === 0 ? '#553388' : '#332255';
+    ctx.shadowColor = '#aa44ff';
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(Math.cos(a + Math.PI / 6) * r * 0.5, Math.sin(a + Math.PI / 6) * r * 0.5);
+    ctx.lineTo(0, 0);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+  // 六边形边框
+  ctx.strokeStyle = 'rgba(170,100,255,0.5)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (var j = 0; j < 6; j++) {
+    var a2 = Math.PI / 3 * j - Math.PI / 2;
+    var r2 = hw;
+    ctx[j === 0 ? 'moveTo' : 'lineTo'](Math.cos(a2) * r2, Math.sin(a2) * r2);
+  }
+  ctx.closePath(); ctx.stroke();
+  // 发光线路
+  ctx.strokeStyle = 'rgba(200,150,255,' + (0.5 + Math.sin(t * 2) * 0.2) + ')';
+  ctx.lineWidth = 1;
+  ctx.shadowColor = '#aa44ff';
+  ctx.shadowBlur = 4;
+  for (var k = 0; k < 3; k++) {
+    var la = Math.PI / 3 * (k * 2) - Math.PI / 2;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(Math.cos(la) * hw * 0.8, Math.sin(la) * hw * 0.8);
+    ctx.stroke();
+  }
+  ctx.shadowBlur = 0;
+};
+
+// 狙击手 - 修长型
+Enemy.prototype._renderSniper = function(ctx, w, h, t) {
+  var hw = w / 2, hh = h / 2;
+  var grad = ctx.createLinearGradient(-hw, 0, hw, 0);
+  grad.addColorStop(0, '#1a0505');
+  grad.addColorStop(0.3, '#3a0a0a');
+  grad.addColorStop(0.5, '#5a1010');
+  grad.addColorStop(0.7, '#3a0a0a');
+  grad.addColorStop(1, '#1a0505');
+  ctx.fillStyle = grad;
+  ctx.shadowColor = '#ff2244';
+  ctx.shadowBlur = 5;
+  ctx.beginPath();
+  ctx.moveTo(-hw, -hh * 0.3);
+  ctx.lineTo(-hw * 0.5, -hh);
+  ctx.lineTo(hw * 0.5, -hh * 0.5);
+  ctx.lineTo(hw, 0);
+  ctx.lineTo(hw * 0.5, hh * 0.5);
+  ctx.lineTo(-hw * 0.5, hh);
+  ctx.lineTo(-hw, hh * 0.3);
+  ctx.closePath();
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  // 狙击镜线
+  ctx.strokeStyle = 'rgba(255,100,100,0.6)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(hw, 0); ctx.lineTo(hw - 6, 0);
+  ctx.stroke();
+};
+
+// 神风 - 尖刺型
+Enemy.prototype._renderKamikaze = function(ctx, w, h, t) {
+  var hw = w / 2, hh = h / 2;
+  var flicker = 0.6 + Math.sin(t * 10) * 0.4;
+  ctx.fillStyle = '#331100';
+  ctx.beginPath();
+  ctx.moveTo(-hw, 0);
+  ctx.lineTo(0, -hh);
+  ctx.lineTo(hw, -hh * 0.2);
+  ctx.lineTo(hw, hh * 0.2);
+  ctx.lineTo(0, hh);
+  ctx.closePath();
+  ctx.fill();
+  // 尖刺
+  ctx.fillStyle = '#ff6600';
+  ctx.shadowColor = '#ff8800';
+  ctx.shadowBlur = 8 * flicker;
+  ctx.beginPath();
+  ctx.moveTo(-hw, 0);
+  ctx.lineTo(-hw - 4, -3);
+  ctx.lineTo(-hw, -3);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(-hw, 0);
+  ctx.lineTo(-hw - 4, 3);
+  ctx.lineTo(-hw, 3);
+  ctx.closePath();
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  // 能量核心
+  var core = ctx.createRadialGradient(0, 0, 0, 0, 0, 4);
+  core.addColorStop(0, '#ff8800');
+  core.addColorStop(0.5, '#ff4400');
+  core.addColorStop(1, 'transparent');
+  ctx.fillStyle = core;
+  ctx.beginPath(); ctx.arc(0, 0, 4, 0, Math.PI * 2); ctx.fill();
+};
+
+// 轰炸机 - 方形装甲
+Enemy.prototype._renderBomber = function(ctx, w, h, t) {
+  var hw = w / 2, hh = h / 2;
+  var grad = ctx.createLinearGradient(0, -hh, 0, hh);
+  grad.addColorStop(0, '#1a3a1a');
+  grad.addColorStop(0.3, '#2a5a2a');
+  grad.addColorStop(0.5, '#3a7a3a');
+  grad.addColorStop(0.7, '#2a5a2a');
+  grad.addColorStop(1, '#1a3a1a');
+  ctx.fillStyle = grad;
+  ctx.shadowColor = '#44ff44';
+  ctx.shadowBlur = 5;
+  ctx.fillRect(-hw, -hh, w, h);
+  ctx.shadowBlur = 0;
+  // 装甲板线
+  ctx.strokeStyle = 'rgba(100,255,100,0.3)';
+  ctx.lineWidth = 0.8;
+  ctx.strokeRect(-hw + 2, -hh + 2, w - 4, h - 4);
+  // 能量核心
+  ctx.fillStyle = '#88ff88';
+  ctx.shadowColor = '#44ff44';
+  ctx.shadowBlur = 4;
+  ctx.beginPath(); ctx.arc(0, 0, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
 };
 
 // ========== BOSS (横版：从右侧进入) ==========
@@ -949,28 +2317,154 @@ Boss.prototype.update = function(dt, player, enemyBullets) {
 Boss.prototype.render = function(ctx) {
   if (!this.active) { return; }
   var cx = this.x, cy = this.y;
+  var t = this.time;
 
+  // 环绕粒子
   for (var i = 0; i < this.orbiters.length; i++) {
     var o = this.orbiters[i];
     if (!o.active) { continue; }
     var ox = cx + Math.cos(o.angle) * o.dist;
     var oy = cy + Math.sin(o.angle) * o.dist;
-    ctx.fillStyle = '#ff6644'; ctx.shadowColor = '#ff6644'; ctx.shadowBlur = 8;
-    ctx.fillRect(ox - o.size / 2, oy - o.size / 2, o.size, o.size);
+    // 轨道器光晕
+    var oGlow = ctx.createRadialGradient(ox, oy, 0, ox, oy, o.size);
+    oGlow.addColorStop(0, 'rgba(255,100,50,0.4)');
+    oGlow.addColorStop(1, 'transparent');
+    ctx.fillStyle = oGlow;
+    ctx.beginPath(); ctx.arc(ox, oy, o.size, 0, Math.PI * 2); ctx.fill();
+    // 轨道器主体
+    var oGrad = ctx.createRadialGradient(ox - 2, oy - 2, 1, ox, oy, o.size / 2);
+    oGrad.addColorStop(0, '#ffcc88');
+    oGrad.addColorStop(0.5, '#ff6644');
+    oGrad.addColorStop(1, '#881100');
+    ctx.fillStyle = oGrad;
+    ctx.shadowColor = '#ff6644'; ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.arc(ox, oy, o.size / 2, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    // 轨道器血条
     if (o.hp < o.maxHp) {
-      ctx.fillStyle = '#333'; ctx.fillRect(ox - 8, oy - o.size - 4, 16, 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(ox - 8, oy - o.size - 4, 16, 2);
       ctx.fillStyle = '#ff4466'; ctx.fillRect(ox - 8, oy - o.size - 4, 16 * (o.hp / o.maxHp), 2);
     }
   }
-  ctx.shadowColor = '#ff2244'; ctx.shadowBlur = 20;
-  var bg = ctx.createRadialGradient(cx, cy, 10, cx, cy, this.width / 2);
-  bg.addColorStop(0, '#ff2244'); bg.addColorStop(0.4, '#881122');
-  bg.addColorStop(0.8, '#330a0a'); bg.addColorStop(1, '#1a0505');
-  ctx.fillStyle = bg;
-  ctx.beginPath(); ctx.ellipse(cx, cy, this.width / 2, this.height / 2, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#ff6688'; ctx.shadowColor = '#ff6688'; ctx.shadowBlur = 15;
-  ctx.beginPath(); ctx.ellipse(cx, cy, 6, 15, 0, 0, Math.PI * 2); ctx.fill();
+
+  // === 能量护盾 ===
+  var shieldAlpha = 0.08 + 0.04 * Math.sin(t * 1.5);
+  var shieldR = this.width * 1.1;
+  ctx.strokeStyle = 'rgba(255,50,50,' + shieldAlpha + ')';
+  ctx.lineWidth = 2;
+  ctx.shadowColor = '#ff2244';
+  ctx.shadowBlur = 15;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, shieldR, shieldR * 0.7, 0, 0, Math.PI * 2);
+  ctx.stroke();
   ctx.shadowBlur = 0;
+
+  // === 多层装甲主体 ===
+  var w = this.width, h = this.height;
+  var hw = w / 2, hh = h / 2;
+
+  // 最外层 - 暗色金属基座
+  ctx.fillStyle = '#0a0505';
+  ctx.shadowColor = '#ff2244';
+  ctx.shadowBlur = 15;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, hw, hh, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // 第二层 - 装甲板
+  var armorGrad = ctx.createRadialGradient(cx - hw * 0.2, cy - hh * 0.2, hw * 0.1, cx, cy, hw * 0.8);
+  armorGrad.addColorStop(0, '#4a1515');
+  armorGrad.addColorStop(0.4, '#2a0a0a');
+  armorGrad.addColorStop(0.7, '#3a1010');
+  armorGrad.addColorStop(1, '#1a0505');
+  ctx.fillStyle = armorGrad;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, hw * 0.85, hh * 0.85, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 第三层 - 核心区
+  var coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, hw * 0.5);
+  coreGrad.addColorStop(0, '#ff2244');
+  coreGrad.addColorStop(0.3, '#cc1133');
+  coreGrad.addColorStop(0.6, '#881122');
+  coreGrad.addColorStop(1, '#330a0a');
+  ctx.fillStyle = coreGrad;
+  ctx.shadowColor = '#ff2244';
+  ctx.shadowBlur = 25;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, hw * 0.5, hh * 0.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // === 装甲板分割线 ===
+  ctx.strokeStyle = 'rgba(255,100,80,0.3)';
+  ctx.lineWidth = 1;
+  for (var j = 0; j < 6; j++) {
+    var la = Math.PI / 3 * j + t * 0.3;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(la) * hw * 0.8, cy + Math.sin(la) * hh * 0.8);
+    ctx.stroke();
+  }
+
+  // === 中央能量核心 ===
+  // 核心脉动
+  var pulse = 1 + Math.sin(t * 3) * 0.15;
+  var icGlow = ctx.createRadialGradient(cx, cy, 0, cx, cy, 12 * pulse);
+  icGlow.addColorStop(0, '#ffffff');
+  icGlow.addColorStop(0.2, '#ff6688');
+  icGlow.addColorStop(0.5, '#ff2244');
+  icGlow.addColorStop(1, 'transparent');
+  ctx.fillStyle = icGlow;
+  ctx.shadowColor = '#ff2244';
+  ctx.shadowBlur = 20 * pulse;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 12 * pulse, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // 核心亮点
+  ctx.fillStyle = '#ffffff';
+  ctx.shadowColor = '#ff8888';
+  ctx.shadowBlur = 8;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // === 发光线路 ===
+  ctx.strokeStyle = 'rgba(255,80,80,' + (0.4 + Math.sin(t * 4) * 0.2) + ')';
+  ctx.lineWidth = 1.5;
+  ctx.shadowColor = '#ff4444';
+  ctx.shadowBlur = 6;
+  // 水平线
+  ctx.beginPath();
+  ctx.moveTo(cx - hw * 0.4, cy);
+  ctx.lineTo(cx + hw * 0.4, cy);
+  ctx.stroke();
+  // 垂直线
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - hh * 0.4);
+  ctx.lineTo(cx, cy + hh * 0.4);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // === 装甲边缘高光 ===
+  ctx.strokeStyle = 'rgba(255,150,130,0.2)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, hw * 0.85, hh * 0.85, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // === 环绕粒子轨道 ===
+  ctx.strokeStyle = 'rgba(255,100,50,0.12)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 8]);
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, hw * 0.9, hh * 0.9, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
 };
 
 Boss.prototype.getOrbiterBounds = function(index) {
@@ -1019,14 +2513,31 @@ PowerUp.prototype.render = function(ctx) {
   ctx.save();
   ctx.translate(this.x, this.y);
   ctx.scale(pulse, pulse);
-  ctx.fillStyle = this.cfg.color; ctx.shadowColor = this.cfg.color; ctx.shadowBlur = 12;
-  ctx.strokeStyle = this.cfg.color; ctx.lineWidth = 1.5;
+  // 外层光晕
+  var glowGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, this.width / 2 + 2);
+  glowGrad.addColorStop(0, this.cfg.color + '66');
+  glowGrad.addColorStop(0.5, this.cfg.color + '22');
+  glowGrad.addColorStop(1, 'transparent');
+  ctx.fillStyle = glowGrad;
+  ctx.beginPath(); ctx.arc(0, 0, this.width / 2 + 2, 0, Math.PI * 2); ctx.fill();
+  // 边框
+  ctx.strokeStyle = this.cfg.color;
+  ctx.lineWidth = 1.5;
+  ctx.shadowColor = this.cfg.color;
+  ctx.shadowBlur = 10;
   ctx.beginPath(); ctx.arc(0, 0, this.width / 2, 0, Math.PI * 2); ctx.stroke();
-  ctx.fillStyle = this.cfg.color + '44'; ctx.fill();
   ctx.shadowBlur = 0;
-  ctx.fillStyle = '#fff'; ctx.font = 'bold 12px monospace';
+  // 填充
+  ctx.fillStyle = this.cfg.color + '33';
+  ctx.beginPath(); ctx.arc(0, 0, this.width / 2, 0, Math.PI * 2); ctx.fill();
+  // 符号
+  ctx.fillStyle = '#ffffff';
+  ctx.shadowColor = this.cfg.color;
+  ctx.shadowBlur = 6;
+  ctx.font = 'bold 12px monospace';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillText(this.cfg.symbol, 0, 0);
+  ctx.shadowBlur = 0;
   ctx.restore();
 };
 
@@ -1042,14 +2553,18 @@ Col.checkBulletEnemy = function(bullets, enemies, particles, audio) {
       if (!e.active) { continue; }
       if (b.collidesWith(e)) {
         b.active = false; e.hp -= b.damage;
-        particles.emit(b.x, b.y, 3, { color: '#ffaa44', speed: 80, spread: 0.5, life: 0.2, size: 2 });
+        // 命中反馈
+        particles.emitHitSpark(b.x, b.y, e.color);
+        particles.emitEnergyRing(b.x, b.y, 8, '#ffffff');
+        e.hitFlash = 0.08;
+        audio.hit();
         if (e.hp <= 0) {
           e.active = false;
-          particles.emit(e.x, e.y, 8, { color: e.color, speed: 150, spread: Math.PI * 2, life: 0.4, size: 2.5 });
-          audio.explode();
+          particles.createExplosion(e.x, e.y, 'small');
+          particles.emitShockwave(e.x, e.y, 20, e.color);
+          audio.explode('small');
           return { killed: true, enemy: e, x: e.x, y: e.y, score: e.score };
         }
-        audio.hit();
         return { killed: false };
       }
     }
@@ -1081,7 +2596,8 @@ Col.checkBulletBoss = function(bullets, boss, particles) {
     if (!b.active || b.isEnemy) { continue; }
     if (b.collidesWith(boss)) {
       b.active = false; boss.hp -= b.damage;
-      particles.emit(b.x, b.y, 2, { color: '#ff6644', speed: 60, life: 0.15, size: 2 });
+      particles.emitHitSpark(b.x, b.y, '#ff6644');
+      particles.emitEnergyRing(b.x, b.y, 10, '#ff4466');
       return { hit: true, damage: b.damage };
     }
     for (var oi = 0; oi < boss.orbiters.length; oi++) {
@@ -1091,7 +2607,8 @@ Col.checkBulletBoss = function(bullets, boss, particles) {
       if (bb.x < ob.x + ob.w && bb.x + bb.w > ob.x && bb.y < ob.y + ob.h && bb.y + bb.h > ob.y) {
         b.active = false; boss.orbiters[oi].hp -= b.damage;
         if (boss.orbiters[oi].hp <= 0) { boss.orbiters[oi].active = false; }
-        particles.emit(b.x, b.y, 3, { color: '#ff8844', speed: 80, life: 0.2, size: 2 });
+        particles.emitHitSpark(b.x, b.y, '#ff8844');
+        particles.emitEnergyRing(b.x, b.y, 6, '#ff8844');
         return { hit: false };
       }
     }
@@ -1106,7 +2623,8 @@ Col.checkEnemyPlayer = function(enemies, player, particles, audio, camera) {
     if (!e.active) { continue; }
     if (e.collidesWith(player)) {
       e.active = false;
-      particles.emit(e.x, e.y, 8, { color: '#ff4466', speed: 150, spread: Math.PI * 2, life: 0.3, size: 2.5 });
+      particles.createExplosion(e.x, e.y, 'small');
+      particles.emitShockwave(e.x, e.y, 20, '#ff4466');
       if (player.takeDamage(1)) { audio.explode(); camera.shake(CFG.SH.ph.i, CFG.SH.ph.d); }
     }
   }
@@ -1245,6 +2763,9 @@ function Game() {
   this.enemiesKilled = 0; this.bossesDefeated = 0;
   this.bossIntroTimer = 0;
   this.bombActive = false; this.bombTimer = 0; this.bombFlash = 0;
+  this.screenFlash = 0;       // 屏幕闪光
+  this.slowMotion = 0;        // 慢动作系数
+  this.slowMotionTarget = 0;  // 慢动作目标值
 
   this.input = new Input();
   this.audio = new AudioManager();
@@ -1264,11 +2785,13 @@ function Game() {
   this.boss = new Boss();
 
   this._initUI();
+  this._initAudio();
   this._resize();
   window.addEventListener('resize', this._resize.bind(this));
 
   this.lastTime = performance.now();
   this._loop = this._loop.bind(this);
+  window._gameInstance = this;
   requestAnimationFrame(this._loop);
   this._showMenu();
 }
@@ -1296,6 +2819,25 @@ Game.prototype._initUI = function() {
   document.getElementById('bs').addEventListener('click', function() { if (self.state === 'PLAYING') { self._triggerDash(); } });
 };
 
+Game.prototype._initAudio = function() {
+  var self = this;
+  // 首次启动音频按钮（浏览器要求用户交互）
+  document.getElementById('audio-start').style.display = 'flex';
+  document.getElementById('asbtn-start').addEventListener('click', function() {
+    self.audio.activate();
+    document.getElementById('audio-start').style.display = 'none';
+    document.getElementById('ac').style.display = 'flex';
+  });
+  // 静音按钮
+  document.getElementById('abtn-mute').addEventListener('click', function() {
+    var muted = self.audio.toggleMute();
+    this.textContent = muted ? '✕' : '♪';
+    this.className = 'abtn' + (muted ? ' muted' : '');
+  });
+  // 通讯定时器
+  this._commsTimer = U.r(8, 20);
+};
+
 Game.prototype._show = function() {
   for (var i = 0; i < arguments.length; i++) { document.getElementById(arguments[i]).style.display = 'flex'; }
 };
@@ -1308,6 +2850,7 @@ Game.prototype._showMenu = function() {
   this.highScore = S.get('highscore', 0);
   this._show('menu'); this._hide('hud', 'bhp', 'pause', 'go', 'warn');
   document.getElementById('mhs').textContent = '最高分：' + this.highScore.toLocaleString();
+  this.audio.setMusicState('ambient');
 };
 
 Game.prototype._startGame = function() {
@@ -1390,6 +2933,19 @@ Game.prototype._updateHUD = function() {
   } else { this._hide('bhp'); }
 };
 
+Game.prototype._updateMusicState = function() {
+  // 根据游戏状态自动切换BGM层
+  if (this.boss.active && this.boss.entered) {
+    this.audio.setMusicState('boss');
+  } else if (this.enemies.length > 3 || this.combo.count > 5) {
+    this.audio.setMusicState('battle');
+  } else if (this.state === 'PLAYING') {
+    this.audio.setMusicState('explore');
+  } else {
+    this.audio.setMusicState('ambient');
+  }
+};
+
 Game.prototype._gameOver = function() {
   this.state = 'GAMEOVER';
   var isNewRecord = this.score > this.highScore;
@@ -1431,6 +2987,12 @@ Game.prototype._loop = function(timestamp) {
   var dt = (timestamp - this.lastTime) / 1000;
   this.lastTime = timestamp;
   if (dt > 0.1) { dt = 0.1; }
+
+  // 慢动作
+  this.slowMotion = U.lerp(this.slowMotion, this.slowMotionTarget, dt * 12);
+  if (Math.abs(this.slowMotion - this.slowMotionTarget) < 0.001) { this.slowMotion = this.slowMotionTarget; }
+  var slowFactor = 1 - this.slowMotion * 0.6;
+  dt *= slowFactor;
   this.time += dt;
 
   this._update(dt);
@@ -1440,6 +3002,10 @@ Game.prototype._loop = function(timestamp) {
 
 Game.prototype._update = function(dt) {
   this.camera.update(dt);
+  // 屏幕闪光衰减
+  if (this.screenFlash > 0) { this.screenFlash -= dt * 3; }
+  // 慢动作自动恢复
+  if (this.slowMotionTarget > 0) { this.slowMotionTarget = Math.max(0, this.slowMotionTarget - dt * 0.8); }
 
   if (this.state === 'MENU' || this.state === 'GAMEOVER') {
     this.starField.update(dt); return;
@@ -1466,9 +3032,41 @@ Game.prototype._update = function(dt) {
   this.particles.update(dt);
   this.combo.update(dt);
 
+  // 音频更新
+  if (this.audio.enabled) {
+    this.audio._updateMusic(dt);
+    // 太空通讯定时
+    this._commsTimer -= dt;
+    if (this._commsTimer <= 0) {
+      this._commsTimer = U.r(10, 25);
+      this.audio.spaceComms();
+    }
+    // 引擎音量随速度变化
+    if (this.audio.envNodes && this.audio.envNodes.engine) {
+      var speed = Math.hypot(this.player.vx || 0, this.player.vy || 0);
+      var engineVol = 0.008 + speed * 0.00005;
+      this.audio.envNodes.engine.gain.gain.setTargetAtTime(engineVol, this.audio.ctx.currentTime, 0.1);
+    }
+  }
+
+  // BGM动态切换
+  this._updateMusicState();
+
   this.player.update(dt, this.input);
-  if (this.player.canFire()) { this.player.fire(this.playerBullets); }
+  if (this.player.canFire()) { this.player.fire(this.playerBullets, this.particles); }
   this.player.fireSubWeapon(this.playerBullets, this.enemies);
+
+  // 引擎尾焰粒子
+  if (this.player.active) {
+    this.particles.emitEngine(this.player.x - this.player.width / 2, this.player.y, -this.player.vx, this.player.vy, true);
+  }
+  // 敌机引擎尾焰
+  for (var ei = 0; ei < this.enemies.length; ei++) {
+    var e = this.enemies[ei];
+    if (e.active) {
+      this.particles.emitEngine(e.x + e.width / 2, e.y + e.floatOff, -e.vx, e.vy, false);
+    }
+  }
 
   for (var i = 0; i < this.playerBullets.list.length; i++) {
     var b = this.playerBullets.list[i];
@@ -1487,6 +3085,10 @@ Game.prototype._update = function(dt) {
       b.homingTarget = target;
     }
     b.update(dt);
+    // 子弹飞行轨迹粒子
+    if (!b.isEnemy) {
+      this.particles.createBulletEffect('default', b.x, b.y, b.color);
+    }
   }
 
   for (var k = 0; k < this.enemyBullets.list.length; k++) {
@@ -1521,6 +3123,9 @@ Game.prototype._update = function(dt) {
       this.enemiesKilled++;
       this.score += Math.floor(colResult.score * this.combo.multiplier);
       this.combo.addKill();
+      this.camera.shake(3, 120);
+      this.screenFlash = Math.min(1, this.screenFlash + 0.08);
+      this.slowMotionTarget = Math.min(1, this.slowMotionTarget + 0.15);
       if (Math.random() < colResult.enemy.dropChance) { PUM.spawn(colResult.x, colResult.y, this.powerups, this.powerupPool); }
     }
   }
@@ -1530,9 +3135,11 @@ Game.prototype._update = function(dt) {
     if (this.boss.hp <= 0) {
       this.boss.active = false; this.bossesDefeated++;
       this.score += 50000;
-      this.particles.emit(this.boss.x, this.boss.y, 40, { color: '#ff4466', speed: 250, spread: Math.PI * 2, life: 0.8, size: 4 });
-      this.particles.emit(this.boss.x, this.boss.y, 20, { color: '#ffd700', speed: 200, spread: Math.PI * 2, life: 0.6, size: 3 });
-      this.audio.explode(); this.camera.shake(CFG.SH.be.i, CFG.SH.be.d);
+      this.particles.createExplosion(this.boss.x, this.boss.y, 'boss');
+      this.particles.emitShockwave(this.boss.x, this.boss.y, 40, '#ff4466');
+      this.audio.explode('boss'); this.camera.shake(CFG.SH.be.i, CFG.SH.be.d);
+      this.screenFlash = Math.min(1, this.screenFlash + 0.3);
+      this.slowMotionTarget = 1;
       PUM.spawn(this.boss.x, this.boss.y, this.powerups, this.powerupPool);
       PUM.spawn(this.boss.x, this.boss.y - 30, this.powerups, this.powerupPool);
       PUM.spawn(this.boss.x, this.boss.y + 30, this.powerups, this.powerupPool);
@@ -1581,9 +3188,15 @@ Game.prototype._render = function() {
   for (var k = 0; k < this.enemyBullets.list.length; k++) { if (this.enemyBullets.list[k].active) { this.enemyBullets.list[k].render(ctx); } }
   for (var m = 0; m < this.playerBullets.list.length; m++) { if (this.playerBullets.list[m].active) { this.playerBullets.list[m].render(ctx); } }
   this.player.render(ctx);
-  this.particles.render(ctx);
+  this.particles.render(ctx, this.time);
 
   ctx.restore();
+
+  // 屏幕闪光
+  if (this.screenFlash > 0.01) {
+    ctx.fillStyle = 'rgba(255,255,255,' + (this.screenFlash * 0.15) + ')';
+    ctx.fillRect(0, 0, CFG.BW, CFG.BH);
+  }
 
   ctx.strokeStyle = '#00f0ff11';
   ctx.lineWidth = 1;
@@ -1591,7 +3204,14 @@ Game.prototype._render = function() {
 };
 
 // ========== BOOT ==========
-window.addEventListener('DOMContentLoaded', function() { new Game(); });
+// 全局声音接口 - 可从外部调用
+window.playSound = function(type) {
+  var game = window._gameInstance;
+  if (game && game.audio && game.audio.enabled) {
+    game.audio.play(type);
+  }
+};
+window.addEventListener('DOMContentLoaded', function() { window._gameInstance = new Game(); });
 </script>
 </body>
 </html>
