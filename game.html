@@ -783,8 +783,11 @@ Particle.prototype.reset = function() {
   this.x = 0; this.y = 0; this.vx = 0; this.vy = 0;
   this.life = 0; this.maxLife = 0; this.active = false;
   this.size = 2; this.endSize = 0; this.color = '#fff'; this.opacity = 1; this.gravity = 0;
-  this.type = 'default'; // default, glow, trail, flash
+  this.type = 'default'; // default, glow, trail, flash, sparkle, debris
   this.glowColor = ''; this.blur = 0;
+  this.rotation = 0; this.rotationSpeed = 0;
+  this.vertices = null; this.arcStart = 0; this.arcEnd = 0;
+  this.depth = 1; this.midColor = '';
 };
 Particle.prototype.init = function(x, y, vx, vy, life, size, color, opts) {
   this.x = x; this.y = y; this.vx = vx; this.vy = vy;
@@ -794,57 +797,202 @@ Particle.prototype.init = function(x, y, vx, vy, life, size, color, opts) {
   this.type = (opts && opts.type) || 'default';
   this.glowColor = (opts && opts.glowColor) || color;
   this.blur = (opts && opts.blur) || 0;
+  this.rotation = (opts && opts.rotation) || 0;
+  this.rotationSpeed = (opts && opts.rotationSpeed) || 0;
+  this.midColor = (opts && opts.midColor) || '';
+  this.depth = (opts && opts.depth !== undefined) ? opts.depth : 1;
   if (opts && opts.gravity) { this.gravity = opts.gravity; }
+  // debris: generate random 3-5 vertex polygon
+  if (this.type === 'debris') {
+    var nv = U.ri(3, 5);
+    this.vertices = [];
+    for (var i = 0; i < nv; i++) {
+      this.vertices.push({ a: (Math.PI * 2 / nv) * i + U.r(-0.3, 0.3), r: U.r(0.5, 1) });
+    }
+  }
+  // energyRing: random arc segment
+  if (this.type === 'energyRing') {
+    this.arcStart = U.r(0, Math.PI * 2);
+    this.arcEnd = this.arcStart + U.r(Math.PI * 0.8, Math.PI * 1.8);
+  }
+  // sparkle: random rotation speed
+  if (this.type === 'sparkle') {
+    this.rotationSpeed = U.r(-12, 12);
+    this.rotation = U.r(0, Math.PI * 2);
+  }
 };
 Particle.prototype.update = function(dt) {
   this.life -= dt;
   if (this.life <= 0) { this.active = false; return; }
   this.x += this.vx * dt; this.y += this.vy * dt;
-  this.vy += this.gravity * dt;
+  // debris: stronger gravity
+  var grav = this.gravity;
+  if (this.type === 'debris') { grav *= 2.5; }
+  this.vy += grav * dt;
   this.opacity = this.life / this.maxLife;
   // 速度衰减
   this.vx *= 0.98;
   this.vy *= 0.98;
+  // rotation
+  this.rotation += this.rotationSpeed * dt;
 };
 Particle.prototype.render = function(ctx) {
   var alpha = this.opacity;
+  // depth modulation: far(0) = dimmer/slower, near(1) = brighter
+  var depthScale = 0.4 + this.depth * 0.6;
   var currentSize = this.endSize ? this.size + (this.endSize - this.size) * (1 - this.opacity) : this.size;
+  currentSize *= depthScale;
+  alpha *= (0.3 + this.depth * 0.7);
   ctx.globalAlpha = alpha;
   if (this.type === 'glow') {
+    // inner white core
+    var coreR = currentSize * 0.25;
+    ctx.fillStyle = 'rgba(255,255,255,' + (alpha * 0.9) + ')';
+    ctx.beginPath(); ctx.arc(this.x, this.y, coreR, 0, Math.PI * 2); ctx.fill();
+    // 3-color radial gradient glow
     var grad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, currentSize);
-    grad.addColorStop(0, this.color);
-    grad.addColorStop(0.5, this.glowColor);
+    grad.addColorStop(0, '#ffffff');
+    grad.addColorStop(0.2, this.color);
+    var midC = this.midColor || this.glowColor;
+    grad.addColorStop(0.55, midC);
     grad.addColorStop(1, 'transparent');
     ctx.fillStyle = grad;
     ctx.beginPath(); ctx.arc(this.x, this.y, currentSize, 0, Math.PI * 2); ctx.fill();
   } else if (this.type === 'trail') {
-    ctx.fillStyle = this.color;
+    // motion blur: stretch along velocity direction
+    var speed = Math.hypot(this.vx, this.vy);
+    var stretch = Math.min(speed * 0.06, currentSize * 3);
+    var ang = Math.atan2(this.vy, this.vx);
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(ang);
+    // size gradient: head larger, tail smaller
+    var headSize = currentSize * 1.2;
+    var tailSize = currentSize * 0.5;
     ctx.shadowColor = this.glowColor;
-    ctx.shadowBlur = this.blur || currentSize * 3;
-    ctx.fillRect(this.x - currentSize / 2, this.y - currentSize / 2, currentSize, currentSize);
+    ctx.shadowBlur = Math.max(this.blur || 0, currentSize * 4);
+    var grad = ctx.createLinearGradient(-stretch, 0, 0, 0);
+    grad.addColorStop(0, this.glowColor || this.color);
+    grad.addColorStop(1, this.color);
+    ctx.fillStyle = grad;
+    // draw tapered shape
+    ctx.beginPath();
+    ctx.moveTo(0, -headSize / 2);
+    ctx.lineTo(-stretch, -tailSize / 2);
+    ctx.lineTo(-stretch, tailSize / 2);
+    ctx.lineTo(0, headSize / 2);
+    ctx.closePath();
+    ctx.fill();
     ctx.shadowBlur = 0;
+    ctx.restore();
+  } else if (this.type === 'sparkle') {
+    // cross star flash
+    var len = currentSize * 2;
+    var flicker = 0.5 + 0.5 * Math.sin(this.life * 40 + this.rotation * 5);
+    ctx.globalAlpha = alpha * flicker;
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.rotation);
+    ctx.strokeStyle = this.color;
+    ctx.lineWidth = Math.max(1, currentSize * 0.3);
+    ctx.shadowColor = this.color;
+    ctx.shadowBlur = currentSize * 3;
+    // main cross
+    ctx.beginPath();
+    ctx.moveTo(-len, 0); ctx.lineTo(len, 0);
+    ctx.moveTo(0, -len); ctx.lineTo(0, len);
+    ctx.stroke();
+    // diagonal cross (smaller)
+    var dLen = len * 0.5;
+    ctx.lineWidth = Math.max(0.5, currentSize * 0.15);
+    ctx.beginPath();
+    ctx.moveTo(-dLen, -dLen); ctx.lineTo(dLen, dLen);
+    ctx.moveTo(dLen, -dLen); ctx.lineTo(-dLen, dLen);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  } else if (this.type === 'debris') {
+    // irregular polygon with metallic reflection
+    if (!this.vertices || this.vertices.length < 3) { ctx.globalAlpha = 1; return; }
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.rotation);
+    // metallic highlight based on rotation
+    var metalBright = 0.6 + 0.4 * Math.sin(this.rotation * 2);
+    ctx.fillStyle = this.color;
+    ctx.shadowColor = this.glowColor || this.color;
+    ctx.shadowBlur = currentSize;
+    ctx.beginPath();
+    for (var vi = 0; vi < this.vertices.length; vi++) {
+      var v = this.vertices[vi];
+      var px = Math.cos(v.a) * v.r * currentSize;
+      var py = Math.sin(v.a) * v.r * currentSize;
+      if (vi === 0) { ctx.moveTo(px, py); } else { ctx.lineTo(px, py); }
+    }
+    ctx.closePath();
+    ctx.fill();
+    // metallic edge highlight
+    ctx.strokeStyle = 'rgba(255,255,255,' + (metalBright * 0.5) + ')';
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.restore();
   } else if (this.type === 'shockwave') {
     var progress = 1 - this.opacity;
     var r = this.ringRadius + (this.endSize - this.ringRadius) * progress;
-    ctx.strokeStyle = this.color;
-    ctx.lineWidth = 3 * (1 - progress);
+    var edgeFade = Math.pow(1 - progress, 1.5);
+    // color gradient: white center to colored edge
+    var grad = ctx.createRadialGradient(this.x, this.y, r * 0.6, this.x, this.y, r);
+    grad.addColorStop(0, 'rgba(255,255,255,' + (edgeFade * 0.3) + ')');
+    grad.addColorStop(1, this.color);
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = 3 * edgeFade + 1;
     ctx.shadowColor = this.glowColor;
-    ctx.shadowBlur = 8 * (1 - progress);
+    ctx.shadowBlur = 10 * edgeFade;
     ctx.beginPath(); ctx.arc(this.x, this.y, r, 0, Math.PI * 2); ctx.stroke();
     ctx.shadowBlur = 0;
-    // 内层光环
-    ctx.strokeStyle = 'rgba(255,255,255,' + (alpha * 0.5) + ')';
+    // inner energy radial lines
+    var lineCount = 8;
+    ctx.globalAlpha = alpha * 0.4 * edgeFade;
+    ctx.strokeStyle = this.color;
+    ctx.lineWidth = 0.8;
+    for (var li = 0; li < lineCount; li++) {
+      var la = (Math.PI * 2 / lineCount) * li + this.rotation;
+      ctx.beginPath();
+      ctx.moveTo(this.x + Math.cos(la) * r * 0.3, this.y + Math.sin(la) * r * 0.3);
+      ctx.lineTo(this.x + Math.cos(la) * r * 0.85, this.y + Math.sin(la) * r * 0.85);
+      ctx.stroke();
+    }
+    // inner ring
+    ctx.globalAlpha = alpha * 0.5 * edgeFade;
+    ctx.strokeStyle = 'rgba(255,255,255,' + (edgeFade * 0.6) + ')';
     ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.arc(this.x, this.y, r * 0.8, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(this.x, this.y, r * 0.75, 0, Math.PI * 2); ctx.stroke();
   } else if (this.type === 'energyRing') {
     var pr = 1 - this.opacity;
     var er = this.ringRadius + (this.endSize - this.ringRadius) * pr;
+    var fade = 1 - pr;
+    // arc segment ring
     ctx.strokeStyle = this.color;
-    ctx.lineWidth = 2 * (1 - pr);
+    ctx.lineWidth = 2.5 * fade;
     ctx.shadowColor = this.glowColor;
-    ctx.shadowBlur = 6 * (1 - pr);
-    ctx.beginPath(); ctx.arc(this.x, this.y, er, 0, Math.PI * 2); ctx.stroke();
+    ctx.shadowBlur = 8 * fade;
+    ctx.beginPath(); ctx.arc(this.x, this.y, er, this.arcStart + this.rotation, this.arcEnd + this.rotation); ctx.stroke();
+    // secondary arc (opposite)
+    ctx.globalAlpha = alpha * 0.5;
+    ctx.lineWidth = 1.5 * fade;
+    ctx.beginPath(); ctx.arc(this.x, this.y, er * 0.85, this.arcStart + this.rotation + Math.PI, this.arcEnd + this.rotation + Math.PI * 0.5); ctx.stroke();
     ctx.shadowBlur = 0;
+    // energy particles along ring
+    var numDots = 4;
+    ctx.fillStyle = this.color;
+    ctx.globalAlpha = alpha * 0.8;
+    for (var di = 0; di < numDots; di++) {
+      var da = this.arcStart + this.rotation + (this.arcEnd - this.arcStart) * (di / numDots) + pr * Math.PI * 2;
+      var dx = this.x + Math.cos(da) * er;
+      var dy = this.y + Math.sin(da) * er;
+      ctx.beginPath(); ctx.arc(dx, dy, Math.max(1, currentSize * 0.4), 0, Math.PI * 2); ctx.fill();
+    }
   } else {
     ctx.fillStyle = this.color;
     ctx.shadowColor = this.color;
@@ -862,6 +1010,10 @@ function ParticleSystem() {
   this.envParticles = [];
   this.envTimer = 0;
   this.maxParticles = 600;
+  // 3D space: player velocity tracking (captured from emitEngine)
+  this._playerVx = 0; this._playerVy = 0; this._playerSpeed = 0;
+  // ambient glow pulse phase
+  this._glowPhase = 0;
 }
 ParticleSystem.prototype.emit = function(x, y, count, cfg) {
   for (var i = 0; i < count; i++) {
@@ -871,9 +1023,15 @@ ParticleSystem.prototype.emit = function(x, y, count, cfg) {
     var speed = cfg.speed || U.r(50, 200);
     var spread = cfg.spread || 0;
     var a = angle + U.r(-spread, spread);
-    var opts = { type: cfg.type || 'default', glowColor: cfg.glowColor, blur: cfg.blur, endSize: cfg.endSize, gravity: cfg.gravity };
+    var opts = {
+      type: cfg.type || 'default', glowColor: cfg.glowColor, blur: cfg.blur,
+      endSize: cfg.endSize, gravity: cfg.gravity,
+      rotation: cfg.rotation, rotationSpeed: cfg.rotationSpeed,
+      midColor: cfg.midColor, depth: cfg.depth
+    };
     p.init(x, y, Math.cos(a) * speed, Math.sin(a) * speed,
       cfg.life || U.r(0.2, 0.6), cfg.size || U.r(1, 3), cfg.color || '#ff4444', opts);
+    if (cfg.ringRadius) { p.ringRadius = cfg.ringRadius; }
     this.particles.push(p);
   }
 };
@@ -881,6 +1039,11 @@ ParticleSystem.prototype.emit = function(x, y, count, cfg) {
 // 引擎尾焰粒子
 ParticleSystem.prototype.emitEngine = function(x, y, vx, vy, isPlayer) {
   if (this.particles.length >= this.maxParticles) { return; }
+  // capture player velocity for 3D effects
+  if (isPlayer) {
+    this._playerVx = -vx; this._playerVy = vy;
+    this._playerSpeed = Math.hypot(this._playerVx, this._playerVy);
+  }
   var count = isPlayer ? 3 : 1;
   for (var i = 0; i < count; i++) {
     var p = this.pool.acquire();
@@ -888,8 +1051,24 @@ ParticleSystem.prototype.emitEngine = function(x, y, vx, vy, isPlayer) {
     var svx = vx * 0.5 + U.r(-20, 20), svy = vy * 0.5 + U.r(-15, 15);
     var color = isPlayer ? ['#00ccff', '#0088ff', '#00aaff'][U.ri(0, 2)] : ['#ff6644', '#ff4422', '#ff5533'][U.ri(0, 2)];
     p.init(sx, sy, svx, svy, U.r(0.15, 0.4), U.r(1.5, 3.5), color,
-      { type: 'glow', glowColor: isPlayer ? '#004488' : '#441100', endSize: 0.5 });
+      { type: 'glow', glowColor: isPlayer ? '#004488' : '#441100', midColor: isPlayer ? '#0066cc' : '#882200', endSize: 0.5, depth: U.r(0.6, 1) });
     this.particles.push(p);
+  }
+  // outer glow halo particle
+  if (this.particles.length < this.maxParticles) {
+    var hp = this.pool.acquire();
+    var hColor = isPlayer ? '#0066ff' : '#ff3300';
+    var hGlow = isPlayer ? '#0033aa' : '#aa1100';
+    hp.init(x + U.r(-2, 2), y + U.r(-1, 1), vx * 0.3 + U.r(-8, 8), vy * 0.3 + U.r(-6, 6), U.r(0.2, 0.35), U.r(4, 7), hColor,
+      { type: 'glow', glowColor: hGlow, midColor: isPlayer ? '#0044cc' : '#cc2200', endSize: 1.5, depth: U.r(0.3, 0.6) });
+    this.particles.push(hp);
+  }
+  // white-hot core particle
+  if (this.particles.length < this.maxParticles) {
+    var cp = this.pool.acquire();
+    cp.init(x + U.r(-1, 1), y + U.r(-1, 1), vx * 0.4 + U.r(-5, 5), vy * 0.4 + U.r(-4, 4), U.r(0.08, 0.18), U.r(1, 2), '#ffffff',
+      { type: 'glow', glowColor: isPlayer ? '#00aaff' : '#ff6633', endSize: 0.2, depth: U.r(0.8, 1) });
+    this.particles.push(cp);
   }
 };
 
@@ -898,8 +1077,11 @@ ParticleSystem.prototype.emitTrail = function(x, y, color) {
   if (this.particles.length >= this.maxParticles) { return; }
   for (var i = 0; i < 2; i++) {
     var p = this.pool.acquire();
-    p.init(x + U.r(-2, 2), y + U.r(-2, 2), U.r(-5, 5), U.r(-5, 5), U.r(0.3, 0.6), U.r(1, 2.5), color,
-      { type: 'trail', glowColor: color, blur: 6, endSize: 0.3 });
+    // richer color: vary hue slightly
+    var colors = [color, color, '#ffffff'];
+    var c = colors[U.ri(0, 2)];
+    p.init(x + U.r(-2, 2), y + U.r(-2, 2), U.r(-8, 8), U.r(-8, 8), U.r(0.3, 0.7), U.r(1, 3), c,
+      { type: 'trail', glowColor: color, midColor: color, blur: 8, endSize: 0.2, depth: U.r(0.5, 1) });
     this.particles.push(p);
   }
 };
@@ -933,7 +1115,19 @@ ParticleSystem.prototype.createExplosion = function(x, y, type) {
   // 第二阶段：火焰粒子
   this.emit(x, y, cfg.count, cfg);
 
-  // 金属碎片
+  // 碎片类型粒子 (debris)
+  this.emitDebris(x, y, Math.floor(cfg.count * 0.4), cfg.color, cfg.speed * 0.8);
+
+  // 闪光类型粒子 (sparkle)
+  this.emitSparkle(x, y, Math.floor(cfg.count * 0.3), '#ffd700');
+
+  // 冲击波增强
+  this.emitShockwave(x, y, cfg.size * 3, cfg.color);
+  if (cfg.count >= 14) {
+    this.emitShockwave(x, y, cfg.size * 5, '#ffffff');
+  }
+
+  // 金属碎片 (trail)
   this.emit(x, y, Math.floor(cfg.count * 0.6), {
     color: cfg.color, speed: cfg.speed * 0.7, spread: cfg.spread, life: cfg.life * 0.8,
     size: cfg.size * 0.6, type: 'trail', glowColor: '#ffaa44', blur: 4, gravity: 80
@@ -950,6 +1144,12 @@ ParticleSystem.prototype.createExplosion = function(x, y, type) {
     color: '#ffd700', speed: cfg.speed * 0.5, spread: cfg.spread, life: cfg.life * 0.6,
     size: cfg.size * 0.7, type: 'trail', glowColor: '#ffaa00', blur: 6, gravity: 30
   });
+
+  // 烟尘效果（灰色半透明缓慢扩散）
+  this.emit(x, y, Math.floor(cfg.count * 0.5), {
+    color: '#888888', speed: cfg.speed * 0.15, spread: cfg.spread, life: cfg.life * 1.5,
+    size: cfg.size * 2, type: 'glow', glowColor: '#555555', midColor: '#666666', endSize: cfg.size * 5, depth: 0.3
+  });
 };
 
 // 冲击波效果
@@ -957,7 +1157,8 @@ ParticleSystem.prototype.emitShockwave = function(x, y, radius, color) {
   if (this.particles.length >= this.maxParticles) { return; }
   var p = this.pool.acquire();
   p.init(x, y, 0, 0, 0.4, radius, color || '#ffffff', {
-    type: 'shockwave', glowColor: color || '#ffffff', blur: 0, endSize: radius * 2.5
+    type: 'shockwave', glowColor: color || '#ffffff', blur: 0, endSize: radius * 2.5,
+    rotationSpeed: U.r(-1.5, 1.5)
   });
   p.ringRadius = radius;
   this.particles.push(p);
@@ -972,7 +1173,7 @@ ParticleSystem.prototype.emitMuzzleFlash = function(x, y, color) {
     var a = U.r(0, Math.PI * 2);
     var spd = U.r(30, 80);
     p.init(x, y, Math.cos(a) * spd, Math.sin(a) * spd, U.r(0.05, 0.12), U.r(2, 5), '#ffffff',
-      { type: 'glow', glowColor: color || '#00ccff', endSize: 0.5 });
+      { type: 'glow', glowColor: color || '#00ccff', midColor: color || '#00ccff', endSize: 0.5, depth: 1 });
     this.particles.push(p);
   }
   // 光晕扩散
@@ -992,14 +1193,17 @@ ParticleSystem.prototype.emitHitSpark = function(x, y, color) {
     color: color || '#ffaa44', speed: 60, spread: Math.PI * 0.4, life: 0.2,
     size: 2, type: 'glow', glowColor: color || '#ffaa44', endSize: 4
   });
+  // sparkle on hit
+  this.emitSparkle(x, y, 2, color || '#ffaa44');
 };
 
 // 能量波纹
 ParticleSystem.prototype.emitEnergyRing = function(x, y, size, color) {
   if (this.particles.length >= this.maxParticles) { return; }
   var p = this.pool.acquire();
-  p.init(x, y, 0, 0, 0.25, size, color || '#00ccff', {
-    type: 'energyRing', glowColor: color || '#00ccff', blur: 0, endSize: size * 3
+  p.init(x, y, 0, 0, 0.3, size, color || '#00ccff', {
+    type: 'energyRing', glowColor: color || '#00ccff', blur: 0, endSize: size * 3,
+    rotationSpeed: U.r(1, 3)
   });
   p.ringRadius = size;
   this.particles.push(p);
@@ -1025,43 +1229,118 @@ ParticleSystem.prototype.createBulletEffect = function(type, x, y, color) {
   }
 };
 
+// 碎片粒子发射
+ParticleSystem.prototype.emitDebris = function(x, y, count, color, speed) {
+  this.emit(x, y, count, {
+    color: color || '#ffaa44', speed: speed || 150, spread: Math.PI * 2, life: U.r(0.4, 1.0),
+    size: U.r(2, 5), type: 'debris', glowColor: color || '#ffaa44', gravity: 120,
+    rotationSpeed: U.r(-8, 8), depth: U.r(0.5, 1)
+  });
+};
+
+// 闪光粒子发射
+ParticleSystem.prototype.emitSparkle = function(x, y, count, color) {
+  this.emit(x, y, count, {
+    color: color || '#ffffff', speed: U.r(20, 80), spread: Math.PI * 2, life: U.r(0.15, 0.4),
+    size: U.r(2, 4), type: 'sparkle', glowColor: color || '#ffffff', depth: U.r(0.6, 1)
+  });
+};
+
 // 环境粒子
 ParticleSystem.prototype._updateEnv = function(dt) {
   this.envTimer -= dt;
   if (this.envTimer <= 0) {
-    this.envTimer = U.r(0.3, 0.8);
-    if (this.envParticles.length < 30) {
-      this.envParticles.push({
-        x: U.r(0, CFG.BW), y: U.r(0, CFG.BH),
-        vx: U.r(-15, -5), vy: U.r(-3, 3),
-        life: U.r(3, 8), maxLife: 0, size: U.r(0.5, 2),
-        color: ['#aaccff','#ddeeff','#eeddff','#99bbff','#ffffff'][U.ri(0, 4)],
-        twinkleOff: U.r(0, Math.PI * 2), twinkleSpd: U.r(0.5, 2)
-      });
-      this.envParticles[this.envParticles.length - 1].maxLife = this.envParticles[this.envParticles.length - 1].life;
+    this.envTimer = U.r(0.15, 0.5);
+    if (this.envParticles.length < 50) {
+      var rtype = U.ri(0, 5); // 0-1: star, 2-3: dust, 4: energy fragment, 5: floating orb
+      var ep;
+      if (rtype <= 1) {
+        // 星星闪烁
+        ep = {
+          x: U.r(0, CFG.BW), y: U.r(0, CFG.BH),
+          vx: U.r(-15, -5), vy: U.r(-3, 3),
+          life: U.r(3, 8), maxLife: 0, size: U.r(0.5, 2),
+          color: ['#aaccff','#ddeeff','#eeddff','#99bbff','#ffffff','#ffeedd','#ffe0c0'][U.ri(0, 6)],
+          twinkleOff: U.r(0, Math.PI * 2), twinkleSpd: U.r(0.5, 2),
+          etype: 'star', depth: U.r(0.2, 1)
+        };
+      } else if (rtype <= 3) {
+        // 宇宙尘埃（小灰点，慢速漂浮）
+        ep = {
+          x: U.r(0, CFG.BW), y: U.r(0, CFG.BH),
+          vx: U.r(-8, -2), vy: U.r(-1, 1),
+          life: U.r(5, 12), maxLife: 0, size: U.r(0.3, 1),
+          color: ['#667788','#778899','#556677','#889999'][U.ri(0, 3)],
+          twinkleOff: U.r(0, Math.PI * 2), twinkleSpd: U.r(0.2, 0.8),
+          etype: 'dust', depth: U.r(0.1, 0.4)
+        };
+      } else if (rtype === 4) {
+        // 能量碎片（发光小点，快速移动）
+        ep = {
+          x: U.r(0, CFG.BW), y: U.r(0, CFG.BH),
+          vx: U.r(-60, -20), vy: U.r(-20, 20),
+          life: U.r(1, 3), maxLife: 0, size: U.r(0.5, 1.5),
+          color: ['#00ccff','#ff66ff','#44ffaa','#ffaa44'][U.ri(0, 3)],
+          twinkleOff: U.r(0, Math.PI * 2), twinkleSpd: U.r(2, 6),
+          etype: 'energy', depth: U.r(0.6, 1)
+        };
+      } else {
+        // 漂浮光点（大而透明的柔和光球）
+        ep = {
+          x: U.r(0, CFG.BW), y: U.r(0, CFG.BH),
+          vx: U.r(-6, -1), vy: U.r(-2, 2),
+          life: U.r(6, 15), maxLife: 0, size: U.r(8, 20),
+          color: ['#334466','#443366','#335544','#554433'][U.ri(0, 3)],
+          twinkleOff: U.r(0, Math.PI * 2), twinkleSpd: U.r(0.3, 1),
+          etype: 'orb', depth: U.r(0.1, 0.3)
+        };
+      }
+      ep.maxLife = ep.life;
+      this.envParticles.push(ep);
     }
   }
   for (var i = this.envParticles.length - 1; i >= 0; i--) {
     var ep = this.envParticles[i];
     ep.life -= dt;
     if (ep.life <= 0) { this.envParticles.splice(i, 1); continue; }
-    ep.x += ep.vx * dt;
-    ep.y += ep.vy * dt;
-    if (ep.x < -10 || ep.x > CFG.BW + 10 || ep.y < -10 || ep.y > CFG.BH + 10) { this.envParticles.splice(i, 1); }
+    // depth modulates speed
+    var dFactor = 0.3 + (ep.depth || 1) * 0.7;
+    ep.x += ep.vx * dFactor * dt;
+    ep.y += ep.vy * dFactor * dt;
+    if (ep.x < -30 || ep.x > CFG.BW + 30 || ep.y < -30 || ep.y > CFG.BH + 30) { this.envParticles.splice(i, 1); }
   }
 };
 
 ParticleSystem.prototype._renderEnv = function(ctx, time) {
   for (var i = 0; i < this.envParticles.length; i++) {
     var ep = this.envParticles[i];
-    var alpha = (ep.life / ep.maxLife) * 0.5;
+    var dFactor = 0.3 + (ep.depth || 1) * 0.7;
+    var alpha = (ep.life / ep.maxLife) * 0.5 * dFactor;
     var twinkle = 0.5 + 0.5 * Math.sin(time * ep.twinkleSpd + ep.twinkleOff);
     ctx.globalAlpha = alpha * twinkle;
-    ctx.fillStyle = ep.color;
-    ctx.shadowColor = ep.color;
-    ctx.shadowBlur = ep.size * 4;
-    ctx.fillRect(ep.x - ep.size / 2, ep.y - ep.size / 2, ep.size, ep.size);
-    ctx.shadowBlur = 0;
+    var sz = ep.size * dFactor;
+    if (ep.etype === 'orb') {
+      // soft glow orb
+      var grad = ctx.createRadialGradient(ep.x, ep.y, 0, ep.x, ep.y, sz);
+      grad.addColorStop(0, ep.color);
+      grad.addColorStop(1, 'transparent');
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(ep.x, ep.y, sz, 0, Math.PI * 2); ctx.fill();
+    } else if (ep.etype === 'energy') {
+      // bright energy dot
+      ctx.fillStyle = ep.color;
+      ctx.shadowColor = ep.color;
+      ctx.shadowBlur = sz * 6;
+      ctx.beginPath(); ctx.arc(ep.x, ep.y, sz, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+    } else {
+      // star / dust
+      ctx.fillStyle = ep.color;
+      ctx.shadowColor = ep.color;
+      ctx.shadowBlur = sz * 4;
+      ctx.fillRect(ep.x - sz / 2, ep.y - sz / 2, sz, sz);
+      ctx.shadowBlur = 0;
+    }
   }
   ctx.globalAlpha = 1;
 };
@@ -1072,11 +1351,62 @@ ParticleSystem.prototype.update = function(dt) {
     if (!this.particles[i].active) { this.pool.release(this.particles[i]); this.particles.splice(i, 1); }
   }
   this._updateEnv(dt);
+  this._glowPhase += dt * 0.5;
 };
+
 ParticleSystem.prototype.render = function(ctx, time) {
-  this._renderEnv(ctx, time || 0);
+  var t = time || 0;
+  this._renderEnv(ctx, t);
   for (var i = 0; i < this.particles.length; i++) { this.particles[i].render(ctx); }
+
+  // === 3D Space Enhancement ===
+  var W = CFG.BW, H = CFG.BH;
+  var cx = W / 2, cy = H / 2;
+
+  // Speed lines (when player moves fast)
+  var pSpd = this._playerSpeed;
+  if (pSpd > 80) {
+    var lineAlpha = Math.min((pSpd - 80) / 400, 0.35);
+    var lineCount = Math.floor(lineAlpha * 30);
+    var pAng = Math.atan2(this._playerVy, this._playerVx);
+    ctx.save();
+    ctx.globalAlpha = lineAlpha;
+    ctx.strokeStyle = '#aaccff';
+    ctx.lineWidth = 0.8;
+    for (var si = 0; si < lineCount; si++) {
+      // deterministic positions using sin hash to avoid flicker
+      var seed = si * 7.31 + 0.5;
+      var la = (Math.sin(seed * 3.7) * 0.5 + 0.5) * Math.PI * 2;
+      var dist = 0.3 + (Math.sin(seed * 2.3) * 0.5 + 0.5) * 0.6;
+      var lx = cx + Math.cos(la) * W * dist * 0.5;
+      var ly = cy + Math.sin(la) * H * dist * 0.5;
+      // line direction: from center outward
+      var ldx = (lx - cx), ldy = (ly - cy);
+      var ll = Math.hypot(ldx, ldy);
+      if (ll < 1) continue;
+      ldx /= ll; ldy /= ll;
+      var len = (10 + (Math.sin(seed * 5.1) * 0.5 + 0.5) * 20) * (pSpd / 200);
+      ctx.beginPath();
+      ctx.moveTo(lx, ly);
+      ctx.lineTo(lx + ldx * len, ly + ldy * len);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Vignette (dark corners)
+  var vGrad = ctx.createRadialGradient(cx, cy, Math.min(W, H) * 0.35, cx, cy, Math.max(W, H) * 0.75);
+  vGrad.addColorStop(0, 'transparent');
+  vGrad.addColorStop(1, 'rgba(10,5,30,0.45)');
+  ctx.fillStyle = vGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Ambient glow pulse (very subtle full-screen color shift)
+  var glowVal = 0.015 + 0.01 * Math.sin(this._glowPhase);
+  ctx.fillStyle = 'rgba(20,10,50,' + glowVal + ')';
+  ctx.fillRect(0, 0, W, H);
 };
+
 ParticleSystem.prototype.clear = function() {
   for (var i = 0; i < this.particles.length; i++) { this.pool.release(this.particles[i]); }
   this.particles.length = 0;
@@ -1085,29 +1415,52 @@ ParticleSystem.prototype.clear = function() {
 
 // ========== STARFIELD (横版：深空多层环境) ==========
 function StarField() {
-  // 第1层：远景微星 - 最深处的星空
+  // 第1层：远景微星 - 最深处的星空（增加暖色星）
   this.layers = [
-    { stars: [], count: 250, speed: 8,  size: 0.6, alpha: 0.45, colors: ['#aaccff','#ccddff','#8899dd','#99aadd','#ffffff'] },
-    { stars: [], count: 150, speed: 22, size: 1.1, alpha: 0.6,  colors: ['#ccddff','#ddeeff','#ffffff','#aaccff','#eeddff'] },
-    { stars: [], count: 80,  speed: 50, size: 1.8, alpha: 0.75, colors: ['#ffffff','#ddeeff','#ffe8ff','#ccddff','#ffffff'] },
-    { stars: [], count: 30,  speed: 100,size: 2.5, alpha: 0.9,  colors: ['#ffffff','#ffffff','#eeddff','#ffffff','#ddeeff'] }
+    { stars: [], count: 280, speed: 8,  size: 0.6, alpha: 0.45, colors: ['#aaccff','#ccddff','#8899dd','#99aadd','#ffffff','#ffddaa','#ffd4a0','#ffe8cc'] },
+    { stars: [], count: 170, speed: 22, size: 1.1, alpha: 0.6,  colors: ['#ccddff','#ddeeff','#ffffff','#aaccff','#eeddff','#ffccaa','#ffd8bb'] },
+    { stars: [], count: 90,  speed: 50, size: 1.8, alpha: 0.75, colors: ['#ffffff','#ddeeff','#ffe8ff','#ccddff','#ffffff','#ffeedd'] },
+    { stars: [], count: 35,  speed: 100,size: 2.5, alpha: 0.9,  colors: ['#ffffff','#ffffff','#eeddff','#ffffff','#ddeeff','#fff5ee'] }
   ];
   this._initStars();
+  // 双层星云（视差）
   this.nebulaCanvas = this._createNebula();
   this.nebulaOffX = 0;
   this.nebulaSpeed = 3;
-  // 星系结构
+  this.nebulaCanvas2 = this._createNebula2();
+  this.nebulaOffX2 = 0;
+  this.nebulaSpeed2 = 1.5;
+  // 星系结构（含小行星、远处星系、太空碎片）
   this.cosmicStructures = this._createCosmicStructures();
+  this.asteroids = this._createAsteroids();
+  this.distantGalaxies = this._createDistantGalaxies();
+  this.spaceDebris = this._createSpaceDebris();
   this.planets = this._createPlanets();
+  // 流星
+  this.meteors = [];
+  this.meteorTimer = 0;
+  this.meteorInterval = U.r(2, 5);
+  // 速度线
+  this.speedLines = [];
+  this.speedLineTimer = 0;
+  // 暗角canvas（预渲染）
+  this.vignetteCanvas = this._createVignette();
 }
 StarField.prototype._initStars = function() {
   for (var li = 0; li < this.layers.length; li++) {
     var layer = this.layers[li];
     for (var i = 0; i < layer.count; i++) {
+      // 超亮星：远层极低概率，近层稍高概率
+      var isSuperBright = Math.random() < (li === 0 ? 0.005 : li === 3 ? 0.08 : 0.02);
+      // 不同闪烁速度混合：慢/中/快
+      var twinkleSpeed = isSuperBright ? U.r(0.5, 1.0) : [U.r(0.1, 0.5), U.r(0.5, 1.8), U.r(2.0, 4.0)][U.ri(0, 2)];
       layer.stars.push({
         x: U.r(0, CFG.BW), y: U.r(0, CFG.BH),
-        brightness: U.r(0.3, 1), twinkleSpeed: U.r(0.3, 1.8), twinkleOffset: U.r(0, Math.PI * 2),
-        colorIdx: U.ri(0, layer.colors.length - 1)
+        brightness: isSuperBright ? 1.0 : U.r(0.3, 1),
+        twinkleSpeed: twinkleSpeed,
+        twinkleOffset: U.r(0, Math.PI * 2),
+        colorIdx: U.ri(0, layer.colors.length - 1),
+        superBright: isSuperBright
       });
     }
   }
@@ -1116,34 +1469,93 @@ StarField.prototype._createNebula = function() {
   var c = document.createElement('canvas');
   c.width = CFG.BW * 2; c.height = CFG.BH;
   var ctx = c.getContext('2d');
-  // 多片星云
+  // 更丰富的星云区域（增加紫色、深蓝、青蓝、品红）
   var nebulas = [
-    { x: 100, y: 120, r: 180, h: 260, hl: 250 }, // 紫色星云
-    { x: 500, y: 300, r: 220, h: 200, hl: 220 }, // 蓝色星云
-    { x: 900, y: 80,  r: 160, h: 280, hl: 300 }, // 紫蓝星云
-    { x: 1300, y: 250, r: 200, h: 180, hl: 200 }, // 青蓝星云
-    { x: 300, y: 380, r: 140, h: 30,  hl: 50  }, // 暖色星云
-    { x: 1100, y: 150, r: 170, h: 240, hl: 260 }, // 深紫星云
+    { x: 80,  y: 100, r: 200, h: 280, hl: 270 },  // 深紫星云
+    { x: 350, y: 300, r: 240, h: 220, hl: 240 },  // 蓝色星云
+    { x: 650, y: 60,  r: 180, h: 300, hl: 310 },  // 品红星云
+    { x: 900, y: 250, r: 220, h: 190, hl: 200 },  // 青蓝星云
+    { x: 1100,y: 130, r: 190, h: 260, hl: 280 },  // 紫蓝星云
+    { x: 1300,y: 350, r: 210, h: 240, hl: 250 },  // 深蓝星云
+    { x: 250, y: 400, r: 160, h: 320, hl: 330 },  // 品红星云
+    { x: 550, y: 180, r: 170, h: 210, hl: 230 },  // 蓝紫星云
+    { x: 1450,y: 80,  r: 180, h: 190, hl: 210 },  // 青蓝星云2
+    { x: 1500,y: 380, r: 150, h: 270, hl: 290 },  // 紫红星云
   ];
   for (var i = 0; i < nebulas.length; i++) {
     var n = nebulas[i];
     var grad = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, n.r);
-    grad.addColorStop(0, 'hsla(' + n.h + ',70%,25%,0.07)');
-    grad.addColorStop(0.3, 'hsla(' + n.hl + ',50%,18%,0.04)');
-    grad.addColorStop(0.6, 'hsla(' + n.h + ',40%,10%,0.02)');
+    grad.addColorStop(0, 'hsla(' + n.h + ',75%,28%,0.09)');
+    grad.addColorStop(0.2, 'hsla(' + n.hl + ',60%,22%,0.06)');
+    grad.addColorStop(0.5, 'hsla(' + n.h + ',45%,14%,0.03)');
+    grad.addColorStop(0.8, 'hsla(' + n.hl + ',30%,8%,0.01)');
     grad.addColorStop(1, 'transparent');
     ctx.fillStyle = grad; ctx.fillRect(n.x - n.r, n.y - n.r, n.r * 2, n.r * 2);
   }
-  // 添加星云丝状结构
-  ctx.globalAlpha = 0.03;
-  for (var j = 0; j < 30; j++) {
+  // 增强星云丝状结构（更明显的弯曲光带）
+  ctx.globalAlpha = 0.05;
+  for (var j = 0; j < 60; j++) {
     var sx = U.r(0, CFG.BW * 2), sy = U.r(0, CFG.BH);
-    ctx.strokeStyle = 'hsla(' + U.r(200, 300) + ',60%,40%,0.5)';
-    ctx.lineWidth = U.r(1, 4);
+    var hue = [200, 220, 260, 280, 300, 320][U.ri(0, 5)];
+    ctx.strokeStyle = 'hsla(' + hue + ',65%,45%,0.6)';
+    ctx.lineWidth = U.r(1, 6);
     ctx.beginPath();
     ctx.moveTo(sx, sy);
-    var cx = sx + U.r(-80, 80), cy = sy + U.r(-40, 40);
-    ctx.quadraticCurveTo(cx, cy, sx + U.r(-100, 100), sy + U.r(-30, 30));
+    var cx1 = sx + U.r(-120, 120), cy1 = sy + U.r(-60, 60);
+    var cx2 = sx + U.r(-180, 180), cy2 = sy + U.r(-50, 50);
+    var ex = sx + U.r(-200, 200), ey = sy + U.r(-40, 40);
+    ctx.bezierCurveTo(cx1, cy1, cx2, cy2, ex, ey);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  // 星云内部亮点（新生恒星感）
+  for (var k = 0; k < nebulas.length; k++) {
+    var nb = nebulas[k];
+    var numBright = U.ri(3, 8);
+    for (var b = 0; b < numBright; b++) {
+      var angle = U.r(0, Math.PI * 2);
+      var dist = U.r(0, nb.r * 0.6);
+      var bx = nb.x + Math.cos(angle) * dist;
+      var by = nb.y + Math.sin(angle) * dist;
+      var br = U.r(2, 8);
+      var bGrad = ctx.createRadialGradient(bx, by, 0, bx, by, br);
+      bGrad.addColorStop(0, 'hsla(' + nb.h + ',80%,70%,0.12)');
+      bGrad.addColorStop(0.5, 'hsla(' + nb.hl + ',60%,50%,0.05)');
+      bGrad.addColorStop(1, 'transparent');
+      ctx.fillStyle = bGrad;
+      ctx.fillRect(bx - br, by - br, br * 2, br * 2);
+    }
+  }
+  return c;
+};
+StarField.prototype._createNebula2 = function() {
+  var c = document.createElement('canvas');
+  c.width = CFG.BW * 2; c.height = CFG.BH;
+  var ctx = c.getContext('2d');
+  // 第二层星云：更大更淡，不同色调
+  var nebulas2 = [
+    { x: 200, y: 200, r: 280, h: 250, hl: 240 },
+    { x: 700, y: 150, r: 300, h: 190, hl: 210 },
+    { x: 1200,y: 300, r: 260, h: 310, hl: 290 },
+    { x: 1500,y: 100, r: 240, h: 270, hl: 260 },
+  ];
+  for (var i = 0; i < nebulas2.length; i++) {
+    var n = nebulas2[i];
+    var grad = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, n.r);
+    grad.addColorStop(0, 'hsla(' + n.h + ',50%,20%,0.06)');
+    grad.addColorStop(0.4, 'hsla(' + n.hl + ',35%,12%,0.03)');
+    grad.addColorStop(1, 'transparent');
+    ctx.fillStyle = grad; ctx.fillRect(n.x - n.r, n.y - n.r, n.r * 2, n.r * 2);
+  }
+  // 淡淡丝状
+  ctx.globalAlpha = 0.025;
+  for (var j = 0; j < 25; j++) {
+    var sx = U.r(0, CFG.BW * 2), sy = U.r(0, CFG.BH);
+    ctx.strokeStyle = 'hsla(' + U.r(220, 300) + ',40%,35%,0.4)';
+    ctx.lineWidth = U.r(2, 8);
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.bezierCurveTo(sx + U.r(-150, 150), sy + U.r(-70, 70), sx + U.r(-200, 200), sy + U.r(-60, 60), sx + U.r(-250, 250), sy + U.r(-50, 50));
     ctx.stroke();
   }
   ctx.globalAlpha = 1;
@@ -1164,14 +1576,89 @@ StarField.prototype._createCosmicStructures = function() {
   }
   return structures;
 };
+StarField.prototype._createAsteroids = function() {
+  var asteroids = [];
+  for (var i = 0; i < 5; i++) {
+    // 不规则多边形顶点
+    var numVerts = U.ri(6, 10);
+    var vertices = [];
+    var baseR = U.r(8, 18);
+    for (var v = 0; v < numVerts; v++) {
+      var a = (v / numVerts) * Math.PI * 2;
+      var rr = baseR * U.r(0.6, 1.3);
+      vertices.push({ a: a, r: rr });
+    }
+    asteroids.push({
+      x: U.r(0, CFG.BW), y: U.r(30, CFG.BH - 30),
+      baseR: baseR,
+      vertices: vertices,
+      speed: U.r(3, 8),
+      rotation: U.r(0, Math.PI * 2),
+      rotSpeed: U.r(-0.3, 0.3),
+      alpha: U.r(0.3, 0.55),
+      color: ['#554433', '#665544', '#4a3d2e', '#5c4f3d', '#3d3328'][U.ri(0, 4)],
+      highlightColor: ['#887766', '#998877', '#7a6d5e'][U.ri(0, 2)]
+    });
+  }
+  return asteroids;
+};
+StarField.prototype._createDistantGalaxies = function() {
+  var galaxies = [];
+  for (var i = 0; i < 4; i++) {
+    var isSpiral = Math.random() < 0.5;
+    galaxies.push({
+      x: U.r(50, CFG.BW - 50), y: U.r(30, CFG.BH - 30),
+      rx: U.r(15, 35), ry: U.r(8, 18),
+      speed: U.r(0.5, 2),
+      rotation: U.r(0, Math.PI * 2),
+      rotSpeed: U.r(-0.02, 0.02),
+      alpha: U.r(0.12, 0.25),
+      hue: [200, 220, 260, 280, 300][U.ri(0, 4)],
+      spiral: isSpiral
+    });
+  }
+  return galaxies;
+};
+StarField.prototype._createSpaceDebris = function() {
+  var debris = [];
+  for (var i = 0; i < 8; i++) {
+    debris.push({
+      x: U.r(0, CFG.BW), y: U.r(0, CFG.BH),
+      size: U.r(1.5, 4),
+      speed: U.r(5, 15),
+      rotation: U.r(0, Math.PI * 2),
+      rotSpeed: U.r(-1.5, 1.5),
+      alpha: U.r(0.2, 0.45),
+      color: ['#889999', '#778888', '#99aaaa', '#aabbbb', '#7788aa'][U.ri(0, 4)],
+      flashTimer: 0, flashInterval: U.r(3, 8)
+    });
+  }
+  return debris;
+};
+StarField.prototype._createVignette = function() {
+  var c = document.createElement('canvas');
+  c.width = CFG.BW; c.height = CFG.BH;
+  var ctx = c.getContext('2d');
+  // 深空暗角效果
+  var vg = ctx.createRadialGradient(CFG.BW / 2, CFG.BH / 2, CFG.BW * 0.28, CFG.BW / 2, CFG.BH / 2, CFG.BW * 0.7);
+  vg.addColorStop(0, 'transparent');
+  vg.addColorStop(0.5, 'rgba(0,0,5,0.15)');
+  vg.addColorStop(0.8, 'rgba(0,0,8,0.4)');
+  vg.addColorStop(1, 'rgba(0,0,10,0.7)');
+  ctx.fillStyle = vg;
+  ctx.fillRect(0, 0, CFG.BW, CFG.BH);
+  return c;
+};
 StarField.prototype._createPlanets = function() {
   var planets = [];
-  // 几个遥远星球
+  // 更多星球种类（气态巨行星、冰蓝行星等）
   var planetDefs = [
-    { x: 650, y: 60, r: 22, color: '#1a3355', ring: true,  ringColor: '#334466' },
-    { x: 200, y: 380, r: 15, color: '#332244', ring: false, ringColor: '' },
-    { x: 750, y: 350, r: 18, color: '#223344', ring: true,  ringColor: '#445577' },
-    { x: 400, y: 100, r: 10, color: '#442233', ring: false, ringColor: '' },
+    { x: 650, y: 55,  r: 32, color: '#1a3355', ring: true,  ringColor: '#445577', type: 'gas',   atmosphereColor: 'rgba(80,120,200,', bands: true },
+    { x: 200, y: 380, r: 22, color: '#2a5577', ring: false, ringColor: '',        type: 'ice',   atmosphereColor: 'rgba(100,180,220,', bands: false },
+    { x: 750, y: 350, r: 28, color: '#223344', ring: true,  ringColor: '#556688', type: 'gas',   atmosphereColor: 'rgba(90,100,160,', bands: true },
+    { x: 400, y: 100, r: 16, color: '#553322', ring: false, ringColor: '',        type: 'rocky', atmosphereColor: 'rgba(160,100,80,', bands: false },
+    { x: 900, y: 200, r: 36, color: '#2a2244', ring: true,  ringColor: '#664477', type: 'gas',   atmosphereColor: 'rgba(120,80,180,', bands: true },
+    { x: 100, y: 200, r: 24, color: '#446688', ring: false, ringColor: '',        type: 'ice',   atmosphereColor: 'rgba(120,200,255,', bands: false },
   ];
   for (var i = 0; i < planetDefs.length; i++) {
     var pd = planetDefs[i];
@@ -1179,10 +1666,26 @@ StarField.prototype._createPlanets = function() {
       x: pd.x, y: pd.y, r: pd.r, color: pd.color,
       ring: pd.ring, ringColor: pd.ringColor,
       speed: U.r(1.5, 3), atmosphere: U.r(0, Math.PI * 2),
-      craters: this._generateCraters(pd.r, pd.color)
+      type: pd.type, atmosphereColor: pd.atmosphereColor,
+      bands: pd.bands,
+      craters: this._generateCraters(pd.r, pd.color),
+      bandData: pd.bands ? this._generateBands(pd.r) : []
     });
   }
   return planets;
+};
+StarField.prototype._generateBands = function(r) {
+  var bands = [];
+  var numBands = U.ri(3, 6);
+  for (var i = 0; i < numBands; i++) {
+    bands.push({
+      y: U.r(-r * 0.7, r * 0.7),
+      height: U.r(2, r * 0.15),
+      alpha: U.r(0.05, 0.15),
+      hueShift: U.ri(-30, 30)
+    });
+  }
+  return bands;
 };
 StarField.prototype._generateCraters = function(r, color) {
   var craters = [];
@@ -1197,6 +1700,8 @@ StarField.prototype._generateCraters = function(r, color) {
 StarField.prototype.update = function(dt) {
   this.nebulaOffX -= this.nebulaSpeed * dt;
   if (this.nebulaOffX < -CFG.BW) { this.nebulaOffX += CFG.BW; }
+  this.nebulaOffX2 -= this.nebulaSpeed2 * dt;
+  if (this.nebulaOffX2 < -CFG.BW) { this.nebulaOffX2 += CFG.BW; }
   for (var li = 0; li < this.layers.length; li++) {
     var layer = this.layers[li];
     for (var i = 0; i < layer.stars.length; i++) {
@@ -1210,27 +1715,101 @@ StarField.prototype.update = function(dt) {
     cs.x -= cs.speed * dt;
     if (cs.x < -10) { cs.x = CFG.BW + 10; cs.y = U.r(0, CFG.BH); }
   }
+  // 小行星移动
+  for (var ai = 0; ai < this.asteroids.length; ai++) {
+    var ast = this.asteroids[ai];
+    ast.x -= ast.speed * dt;
+    ast.rotation += ast.rotSpeed * dt;
+    if (ast.x < -ast.baseR * 2) { ast.x = CFG.BW + ast.baseR * 2; ast.y = U.r(30, CFG.BH - 30); }
+  }
+  // 远处星系移动
+  for (var gi = 0; gi < this.distantGalaxies.length; gi++) {
+    var gal = this.distantGalaxies[gi];
+    gal.x -= gal.speed * dt;
+    gal.rotation += gal.rotSpeed * dt;
+    if (gal.x < -gal.rx * 2) { gal.x = CFG.BW + gal.rx * 2; gal.y = U.r(30, CFG.BH - 30); }
+  }
+  // 太空碎片移动
+  for (var di = 0; di < this.spaceDebris.length; di++) {
+    var deb = this.spaceDebris[di];
+    deb.x -= deb.speed * dt;
+    deb.rotation += deb.rotSpeed * dt;
+    deb.flashTimer += dt;
+    if (deb.x < -10) { deb.x = CFG.BW + 10; deb.y = U.r(0, CFG.BH); deb.flashTimer = 0; }
+  }
   for (var k = 0; k < this.planets.length; k++) {
     var p = this.planets[k];
     p.x -= p.speed * dt;
     if (p.x < -p.r * 2) { p.x = CFG.BW + p.r * 2; p.y = U.r(40, CFG.BH - 40); }
   }
+  // 流星生成与更新
+  this.meteorTimer += dt;
+  if (this.meteorTimer >= this.meteorInterval) {
+    this.meteorTimer = 0;
+    this.meteorInterval = U.r(1.5, 4.5);
+    this.meteors.push({
+      x: U.r(CFG.BW * 0.3, CFG.BW),
+      y: U.r(0, CFG.BH * 0.5),
+      vx: U.r(-350, -180),
+      vy: U.r(80, 200),
+      life: 1.0,
+      decay: U.r(0.6, 1.2),
+      length: U.r(40, 90),
+      width: U.r(1.5, 3)
+    });
+  }
+  for (var mi = this.meteors.length - 1; mi >= 0; mi--) {
+    var m = this.meteors[mi];
+    m.x += m.vx * dt; m.y += m.vy * dt;
+    m.life -= m.decay * dt;
+    if (m.life <= 0) { this.meteors.splice(mi, 1); }
+  }
+  // 速度线更新
+  this.speedLineTimer += dt;
+  if (this.speedLineTimer > 0.08) {
+    this.speedLineTimer = 0;
+    if (Math.random() < 0.35) {
+      this.speedLines.push({
+        x: CFG.BW + 10, y: U.r(0, CFG.BH),
+        speed: U.r(400, 800), length: U.r(20, 60),
+        alpha: U.r(0.08, 0.2), life: 1.0
+      });
+    }
+  }
+  for (var si = this.speedLines.length - 1; si >= 0; si--) {
+    var sl = this.speedLines[si];
+    sl.x -= sl.speed * dt;
+    sl.life -= dt * 1.5;
+    if (sl.life <= 0 || sl.x + sl.length < 0) { this.speedLines.splice(si, 1); }
+  }
 };
 StarField.prototype.render = function(ctx, time) {
-  // 深空底色
-  var bgGrad = ctx.createLinearGradient(0, 0, 0, CFG.BH);
-  bgGrad.addColorStop(0, '#020210');
-  bgGrad.addColorStop(0.3, '#050520');
-  bgGrad.addColorStop(0.6, '#030318');
-  bgGrad.addColorStop(1, '#010108');
+  // 深空底色（微弱深蓝/紫色调）
+  var bgGrad = ctx.createLinearGradient(0, 0, CFG.BW * 0.3, CFG.BH);
+  bgGrad.addColorStop(0, '#03031a');
+  bgGrad.addColorStop(0.3, '#050522');
+  bgGrad.addColorStop(0.6, '#040420');
+  bgGrad.addColorStop(1, '#020212');
   ctx.fillStyle = bgGrad;
   ctx.fillRect(0, 0, CFG.BW, CFG.BH);
 
-  // 星云流动
-  ctx.globalAlpha = 0.5;
+  // 第二层星云（更远，更慢，先绘制）
+  ctx.globalAlpha = 0.35;
+  ctx.drawImage(this.nebulaCanvas2, this.nebulaOffX2, 0, CFG.BW, CFG.BH, 0, 0, CFG.BW, CFG.BH);
+  ctx.drawImage(this.nebulaCanvas2, this.nebulaOffX2 + CFG.BW, 0, CFG.BW, CFG.BH, 0, 0, CFG.BW, CFG.BH);
+  ctx.globalAlpha = 1;
+
+  // 第一层星云流动
+  ctx.globalAlpha = 0.55;
   ctx.drawImage(this.nebulaCanvas, this.nebulaOffX, 0, CFG.BW, CFG.BH, 0, 0, CFG.BW, CFG.BH);
   ctx.drawImage(this.nebulaCanvas, this.nebulaOffX + CFG.BW, 0, CFG.BW, CFG.BH, 0, 0, CFG.BW, CFG.BH);
   ctx.globalAlpha = 1;
+
+  // 远处星系（最远层，极淡）
+  for (var gi = 0; gi < this.distantGalaxies.length; gi++) {
+    var gal = this.distantGalaxies[gi];
+    this._renderGalaxy(ctx, gal, time);
+  }
 
   // 宇宙尘埃
   for (var j = 0; j < this.cosmicStructures.length; j++) {
@@ -1244,30 +1823,116 @@ StarField.prototype.render = function(ctx, time) {
   }
   ctx.globalAlpha = 1;
 
+  // 太空碎片（金属反光）
+  for (var di = 0; di < this.spaceDebris.length; di++) {
+    var deb = this.spaceDebris[di];
+    ctx.save();
+    ctx.translate(deb.x, deb.y);
+    ctx.rotate(deb.rotation);
+    // 偶尔金属反光
+    var flash = (deb.flashTimer % deb.flashInterval < 0.1) ? 0.4 : 0;
+    ctx.globalAlpha = deb.alpha + flash;
+    ctx.fillStyle = flash > 0 ? '#ffffff' : deb.color;
+    ctx.fillRect(-deb.size / 2, -deb.size / 4, deb.size, deb.size / 2);
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+
+  // 小行星
+  for (var ai = 0; ai < this.asteroids.length; ai++) {
+    var ast = this.asteroids[ai];
+    this._renderAsteroid(ctx, ast);
+  }
+
   // 星球
   for (var k = 0; k < this.planets.length; k++) {
     var p = this.planets[k];
     this._renderPlanet(ctx, p, time);
   }
 
-  // 四层星空
+  // 四层星空（带景深：远层更暗淡）
+  var depthAlpha = [0.35, 0.55, 0.75, 0.95];
   for (var li = 0; li < this.layers.length; li++) {
     var layer = this.layers[li];
-    ctx.globalAlpha = layer.alpha;
+    ctx.globalAlpha = depthAlpha[li];
     for (var i = 0; i < layer.stars.length; i++) {
       var s = layer.stars[i];
       var twinkle = 0.5 + 0.5 * Math.sin(time * s.twinkleSpeed + s.twinkleOffset);
-      var alpha = s.brightness * twinkle;
       var starColor = layer.colors[s.colorIdx];
-      ctx.fillStyle = starColor;
-      ctx.shadowColor = starColor;
-      ctx.shadowBlur = layer.size * 2.5;
-      var sz = layer.size * (li === 0 ? 1 : (0.8 + twinkle * 0.4));
-      ctx.fillRect(s.x - sz / 2, s.y - sz / 2, sz, sz);
+
+      if (s.superBright) {
+        // 超亮星：十字光芒 + 强辉光
+        var sbAlpha = 0.7 + twinkle * 0.3;
+        ctx.globalAlpha = sbAlpha;
+        ctx.fillStyle = '#ffffff';
+        ctx.shadowColor = starColor;
+        ctx.shadowBlur = 12;
+        ctx.fillRect(s.x - 1.5, s.y - 1.5, 3, 3);
+        // 十字光芒
+        ctx.strokeStyle = 'rgba(255,255,255,' + (0.25 * sbAlpha) + ')';
+        ctx.lineWidth = 0.8;
+        var crossLen = 6 + twinkle * 4;
+        ctx.beginPath();
+        ctx.moveTo(s.x - crossLen, s.y); ctx.lineTo(s.x + crossLen, s.y);
+        ctx.moveTo(s.x, s.y - crossLen); ctx.lineTo(s.x, s.y + crossLen);
+        ctx.stroke();
+        // 45度十字（更短更淡）
+        ctx.strokeStyle = 'rgba(255,255,255,' + (0.12 * sbAlpha) + ')';
+        ctx.lineWidth = 0.5;
+        var crossLen2 = crossLen * 0.6;
+        ctx.beginPath();
+        ctx.moveTo(s.x - crossLen2 * 0.7, s.y - crossLen2 * 0.7); ctx.lineTo(s.x + crossLen2 * 0.7, s.y + crossLen2 * 0.7);
+        ctx.moveTo(s.x + crossLen2 * 0.7, s.y - crossLen2 * 0.7); ctx.lineTo(s.x - crossLen2 * 0.7, s.y + crossLen2 * 0.7);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      } else {
+        var alpha = s.brightness * twinkle;
+        ctx.fillStyle = starColor;
+        ctx.shadowColor = starColor;
+        ctx.shadowBlur = layer.size * 2.5;
+        var sz = layer.size * (li === 0 ? 1 : (0.8 + twinkle * 0.4));
+        ctx.fillRect(s.x - sz / 2, s.y - sz / 2, sz, sz);
+        ctx.shadowBlur = 0;
+      }
     }
-    ctx.shadowBlur = 0;
   }
   ctx.globalAlpha = 1;
+
+  // 流星
+  for (var mi = 0; mi < this.meteors.length; mi++) {
+    var m = this.meteors[mi];
+    var mAlpha = m.life * 0.9;
+    var mGrad = ctx.createLinearGradient(m.x, m.y, m.x - m.vx * 0.12, m.y - m.vy * 0.12);
+    mGrad.addColorStop(0, 'rgba(255,255,255,' + mAlpha + ')');
+    mGrad.addColorStop(0.3, 'rgba(200,220,255,' + (mAlpha * 0.6) + ')');
+    mGrad.addColorStop(1, 'rgba(100,150,255,0)');
+    ctx.strokeStyle = mGrad;
+    ctx.lineWidth = m.width * m.life;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(m.x, m.y);
+    var tailLen = m.length * m.life;
+    var dir = Math.atan2(m.vy, m.vx);
+    ctx.lineTo(m.x - Math.cos(dir) * tailLen, m.y - Math.sin(dir) * tailLen);
+    ctx.stroke();
+    ctx.lineCap = 'butt';
+  }
+
+  // 速度线
+  for (var si = 0; si < this.speedLines.length; si++) {
+    var sl = this.speedLines[si];
+    ctx.globalAlpha = sl.alpha * sl.life;
+    ctx.strokeStyle = 'rgba(150,180,255,0.5)';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(sl.x, sl.y);
+    ctx.lineTo(sl.x + sl.length, sl.y);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // 深空暗角
+  ctx.drawImage(this.vignetteCanvas, 0, 0);
 
   // 扫描线效果
   ctx.fillStyle = 'rgba(0,0,0,0.02)';
@@ -1276,42 +1941,187 @@ StarField.prototype.render = function(ctx, time) {
 
 StarField.prototype._renderPlanet = function(ctx, p, time) {
   ctx.save();
-  ctx.globalAlpha = 0.5;
+  ctx.globalAlpha = 0.65;
+
+  // 大气层光晕（外发光）
+  var atmoGrad = ctx.createRadialGradient(p.x, p.y, p.r * 0.85, p.x, p.y, p.r * 1.4);
+  atmoGrad.addColorStop(0, 'transparent');
+  atmoGrad.addColorStop(0.4, p.atmosphereColor + '0.08)');
+  atmoGrad.addColorStop(0.7, p.atmosphereColor + '0.04)');
+  atmoGrad.addColorStop(1, 'transparent');
+  ctx.fillStyle = atmoGrad;
+  ctx.fillRect(p.x - p.r * 1.5, p.y - p.r * 1.5, p.r * 3, p.r * 3);
+
   // 星球主体
-  var grad = ctx.createRadialGradient(p.x - p.r * 0.3, p.y - p.r * 0.3, p.r * 0.1, p.x, p.y, p.r);
-  grad.addColorStop(0, '#556688');
-  grad.addColorStop(0.5, p.color);
-  grad.addColorStop(1, '#050510');
+  var grad = ctx.createRadialGradient(p.x - p.r * 0.35, p.y - p.r * 0.35, p.r * 0.08, p.x, p.y, p.r);
+  grad.addColorStop(0, '#7788aa');
+  grad.addColorStop(0.3, p.color);
+  grad.addColorStop(0.85, '#080815');
+  grad.addColorStop(1, '#020208');
   ctx.fillStyle = grad;
   ctx.beginPath();
   ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
   ctx.fill();
-  // 大气层光晕
-  ctx.strokeStyle = 'rgba(100,140,200,0.15)';
-  ctx.lineWidth = 2;
-  ctx.stroke();
-  // 环形山
-  for (var i = 0; i < p.craters.length; i++) {
-    var cr = p.craters[i];
-    var cx = p.x + Math.cos(cr.angle) * cr.dist;
-    var cy = p.y + Math.sin(cr.angle) * cr.dist;
-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
-    ctx.beginPath();
-    ctx.arc(cx, cy, cr.size, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-    ctx.lineWidth = 0.5;
-    ctx.stroke();
+
+  // 昼夜分界线（明暗分割）
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+  ctx.clip();
+  // 右侧为暗面
+  var nightGrad = ctx.createLinearGradient(p.x - p.r, p.y, p.x + p.r, p.y);
+  nightGrad.addColorStop(0, 'rgba(0,0,0,0)');
+  nightGrad.addColorStop(0.45, 'rgba(0,0,0,0)');
+  nightGrad.addColorStop(0.6, 'rgba(0,0,5,0.25)');
+  nightGrad.addColorStop(1, 'rgba(0,0,5,0.55)');
+  ctx.fillStyle = nightGrad;
+  ctx.fillRect(p.x - p.r, p.y - p.r, p.r * 2, p.r * 2);
+
+  // 气态行星条纹
+  if (p.bands && p.bandData) {
+    for (var bi = 0; bi < p.bandData.length; bi++) {
+      var bd = p.bandData[bi];
+      ctx.globalAlpha = bd.alpha;
+      ctx.fillStyle = 'hsla(220,30%,40%,' + bd.alpha + ')';
+      ctx.fillRect(p.x - p.r, p.y + bd.y, p.r * 2, bd.height);
+    }
   }
-  // 光环
+
+  // 环形山（岩石行星）
+  if (p.type === 'rocky') {
+    for (var i = 0; i < p.craters.length; i++) {
+      var cr = p.craters[i];
+      var cx = p.x + Math.cos(cr.angle) * cr.dist;
+      var cy = p.y + Math.sin(cr.angle) * cr.dist;
+      // 仅在星球圆内绘制
+      var dx = cx - p.x, dy = cy - p.y;
+      if (dx * dx + dy * dy < p.r * p.r) {
+        ctx.globalAlpha = 0.4;
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.beginPath();
+        ctx.arc(cx, cy, cr.size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
+      }
+    }
+  }
+  ctx.restore();
+
+  // 大气层边缘发光（边缘线）
+  ctx.globalAlpha = 0.3;
+  var edgeGrad = ctx.createRadialGradient(p.x, p.y, p.r * 0.92, p.x, p.y, p.r * 1.05);
+  edgeGrad.addColorStop(0, 'transparent');
+  edgeGrad.addColorStop(0.5, p.atmosphereColor + '0.15)');
+  edgeGrad.addColorStop(1, 'transparent');
+  ctx.fillStyle = edgeGrad;
+  ctx.fillRect(p.x - p.r * 1.1, p.y - p.r * 1.1, p.r * 2.2, p.r * 2.2);
+
+  // 光环（增强）
   if (p.ring) {
+    ctx.globalAlpha = 0.25;
     ctx.strokeStyle = p.ringColor;
-    ctx.globalAlpha = 0.2;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.ellipse(p.x, p.y, p.r * 1.8, p.r * 0.5, -0.35, 0, Math.PI * 2);
+    ctx.stroke();
+    // 第二环
+    ctx.globalAlpha = 0.12;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(p.x, p.y, p.r * 2.1, p.r * 0.58, -0.35, 0, Math.PI * 2);
+    ctx.stroke();
+    // 第三环（淡）
+    ctx.globalAlpha = 0.06;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.ellipse(p.x, p.y, p.r * 1.6, p.r * 0.45, -0.4, 0, Math.PI * 2);
+    ctx.ellipse(p.x, p.y, p.r * 2.35, p.r * 0.65, -0.35, 0, Math.PI * 2);
     ctx.stroke();
   }
+  ctx.restore();
+};
+
+StarField.prototype._renderAsteroid = function(ctx, ast) {
+  ctx.save();
+  ctx.translate(ast.x, ast.y);
+  ctx.rotate(ast.rotation);
+  ctx.globalAlpha = ast.alpha;
+
+  // 不规则多边形
+  ctx.beginPath();
+  var v0 = ast.vertices[0];
+  ctx.moveTo(Math.cos(v0.a) * v0.r, Math.sin(v0.a) * v0.r);
+  for (var v = 1; v < ast.vertices.length; v++) {
+    var vt = ast.vertices[v];
+    ctx.lineTo(Math.cos(vt.a) * vt.r, Math.sin(vt.a) * vt.r);
+  }
+  ctx.closePath();
+
+  // 简单纹理：径向渐变模拟光照
+  var astGrad = ctx.createRadialGradient(-ast.baseR * 0.3, -ast.baseR * 0.3, 0, 0, 0, ast.baseR);
+  astGrad.addColorStop(0, ast.highlightColor);
+  astGrad.addColorStop(0.6, ast.color);
+  astGrad.addColorStop(1, '#1a1510');
+  ctx.fillStyle = astGrad;
+  ctx.fill();
+
+  // 边缘
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+
+  ctx.restore();
+};
+
+StarField.prototype._renderGalaxy = function(ctx, gal, time) {
+  ctx.save();
+  ctx.translate(gal.x, gal.y);
+  ctx.rotate(gal.rotation);
+  ctx.globalAlpha = gal.alpha;
+
+  // 椭圆模糊渐变
+  var galGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, gal.rx);
+  galGrad.addColorStop(0, 'hsla(' + gal.hue + ',50%,55%,0.3)');
+  galGrad.addColorStop(0.3, 'hsla(' + gal.hue + ',40%,35%,0.15)');
+  galGrad.addColorStop(0.6, 'hsla(' + gal.hue + ',30%,20%,0.06)');
+  galGrad.addColorStop(1, 'transparent');
+
+  ctx.save();
+  ctx.scale(1, gal.ry / gal.rx);
+  ctx.fillStyle = galGrad;
+  ctx.beginPath();
+  ctx.arc(0, 0, gal.rx, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // 螺旋臂
+  if (gal.spiral) {
+    ctx.globalAlpha = gal.alpha * 0.5;
+    ctx.strokeStyle = 'hsla(' + gal.hue + ',50%,50%,0.2)';
+    ctx.lineWidth = 1.5;
+    for (var arm = 0; arm < 2; arm++) {
+      ctx.beginPath();
+      var startAngle = arm * Math.PI;
+      for (var t = 0; t < 3; t += 0.1) {
+        var a = startAngle + t * 1.5;
+        var r = t * gal.rx * 0.3;
+        var px = Math.cos(a) * r;
+        var py = Math.sin(a) * r * (gal.ry / gal.rx);
+        if (t === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+    }
+  }
+
+  // 中心亮点
+  ctx.globalAlpha = gal.alpha * 1.5;
+  ctx.fillStyle = 'hsla(' + gal.hue + ',60%,70%,0.3)';
+  ctx.beginPath();
+  ctx.arc(0, 0, 2, 0, Math.PI * 2);
+  ctx.fill();
+
   ctx.restore();
 };
 
@@ -1619,184 +2429,312 @@ Player.prototype._renderBody = function(ctx, cx, cy, alpha, full) {
 
   // === 推进器尾焰 ===
   var speed = Math.hypot(this.vx, this.vy);
-  var flameLen = 8 + speed * 0.02 + Math.sin(flame * 3) * 5;
-  // 外层光晕
-  ctx.fillStyle = 'rgba(0,180,255,0.15)';
+  var flameLen = 14 + speed * 0.03 + Math.sin(flame * 3) * 6;
+  // 粒子喷射散点
+  for (var pi = 0; pi < 6; pi++) {
+    var ppx = -hw - 4 - Math.random() * flameLen * 0.7;
+    var ppy = (Math.random() - 0.5) * 8;
+    var psz = 1 + Math.random() * 1.5;
+    ctx.fillStyle = 'rgba(0,180,255,' + (0.15 + Math.random() * 0.15) + ')';
+    ctx.beginPath(); ctx.arc(ppx, ppy, psz, 0, Math.PI * 2); ctx.fill();
+  }
+  // 紫蓝色外层光晕环
+  ctx.fillStyle = 'rgba(120,60,255,0.12)';
   ctx.beginPath();
-  ctx.ellipse(-hw - 4, 0, flameLen * 0.6, 8, 0, 0, Math.PI * 2);
+  ctx.ellipse(-hw - 6, 0, flameLen * 0.8, 12, 0, 0, Math.PI * 2);
   ctx.fill();
-  // 中层火焰
+  ctx.fillStyle = 'rgba(0,180,255,0.1)';
+  ctx.beginPath();
+  ctx.ellipse(-hw - 4, 0, flameLen * 0.65, 9, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // 中层火焰（更动态）
   var fgOuter = ctx.createLinearGradient(-hw, 0, -hw - flameLen, 0);
-  fgOuter.addColorStop(0, '#00ccff');
-  fgOuter.addColorStop(0.3, '#0088ff');
-  fgOuter.addColorStop(0.7, '#0044cc');
+  fgOuter.addColorStop(0, '#00eeff');
+  fgOuter.addColorStop(0.2, '#0088ff');
+  fgOuter.addColorStop(0.5, '#6644cc');
+  fgOuter.addColorStop(0.8, '#2200aa');
   fgOuter.addColorStop(1, 'transparent');
   ctx.fillStyle = fgOuter;
   ctx.beginPath();
-  ctx.moveTo(-hw - 2, -6);
-  ctx.lineTo(-hw - flameLen, -2 + Math.sin(flame * 5) * 2);
-  ctx.lineTo(-hw - flameLen * 0.8, 0);
-  ctx.lineTo(-hw - flameLen, 2 - Math.sin(flame * 5) * 2);
-  ctx.lineTo(-hw - 2, 6);
+  ctx.moveTo(-hw - 2, -7);
+  ctx.lineTo(-hw - flameLen, -3 + Math.sin(flame * 5) * 3);
+  ctx.lineTo(-hw - flameLen * 0.85, 0);
+  ctx.lineTo(-hw - flameLen, 3 - Math.sin(flame * 5) * 3);
+  ctx.lineTo(-hw - 2, 7);
   ctx.closePath();
   ctx.fill();
-  // 内层核心火焰（白色高热）
-  var fgInner = ctx.createLinearGradient(-hw, 0, -hw - flameLen * 0.6, 0);
+  // 内层核心火焰（白热脉动更强）
+  var hotPulse = 1 + Math.sin(flame * 8) * 0.35;
+  var fgInner = ctx.createLinearGradient(-hw, 0, -hw - flameLen * 0.7, 0);
   fgInner.addColorStop(0, '#ffffff');
-  fgInner.addColorStop(0.2, '#aaddff');
-  fgInner.addColorStop(0.6, '#0088ff');
+  fgInner.addColorStop(0.15, '#ccddff');
+  fgInner.addColorStop(0.4, '#00aaff');
+  fgInner.addColorStop(0.7, '#6644cc');
   fgInner.addColorStop(1, 'transparent');
   ctx.fillStyle = fgInner;
   ctx.beginPath();
-  ctx.moveTo(-hw - 2, -3);
-  ctx.lineTo(-hw - flameLen * 0.6, -1 + Math.sin(flame * 7) * 1.5);
-  ctx.lineTo(-hw - flameLen * 0.5, 0);
-  ctx.lineTo(-hw - flameLen * 0.6, 1 - Math.sin(flame * 7) * 1.5);
-  ctx.lineTo(-hw - 2, 3);
+  ctx.moveTo(-hw - 2, -3.5 * hotPulse);
+  ctx.lineTo(-hw - flameLen * 0.7, -1 + Math.sin(flame * 7) * 1.5);
+  ctx.lineTo(-hw - flameLen * 0.55, 0);
+  ctx.lineTo(-hw - flameLen * 0.7, 1 - Math.sin(flame * 7) * 1.5);
+  ctx.lineTo(-hw - 2, 3.5 * hotPulse);
   ctx.closePath();
   ctx.fill();
+  // 双引擎尾焰（翼根处上下各一个）
+  var wingFlame = 5 + Math.sin(flame * 4) * 2;
+  for (var wfi = -1; wfi <= 1; wfi += 2) {
+    var wfy = wfi * hh * 0.55;
+    var wfg = ctx.createLinearGradient(-hw + 8, wfy, -hw + 8 - wingFlame, wfy);
+    wfg.addColorStop(0, '#00ccff');
+    wfg.addColorStop(0.4, '#0066cc');
+    wfg.addColorStop(1, 'transparent');
+    ctx.fillStyle = wfg;
+    ctx.beginPath();
+    ctx.moveTo(-hw + 8, wfy - 2);
+    ctx.lineTo(-hw + 8 - wingFlame, wfy + Math.sin(flame * 6 + wfi) * 1);
+    ctx.lineTo(-hw + 8, wfy + 2);
+    ctx.closePath();
+    ctx.fill();
+  }
 
   // === 机身主体 ===
-  // 底部暗色金属
-  ctx.fillStyle = '#0a1a2a';
-  ctx.shadowColor = '#004488';
-  ctx.shadowBlur = 4;
+  // 底部暗色金属（增强3D阴影）
+  ctx.fillStyle = '#060e1a';
+  ctx.shadowColor = '#003366';
+  ctx.shadowBlur = 6;
   ctx.beginPath();
-  ctx.moveTo(hw, 0);
-  ctx.lineTo(0, -hh);
-  ctx.lineTo(-hw + 4, -hh * 0.6);
-  ctx.lineTo(-hw, -hh * 0.3);
-  ctx.lineTo(-hw + 2, 0);
-  ctx.lineTo(-hw, hh * 0.3);
-  ctx.lineTo(-hw + 4, hh * 0.6);
-  ctx.lineTo(0, hh);
+  ctx.moveTo(hw + 2, 0);
+  ctx.lineTo(1, -hh - 1);
+  ctx.lineTo(-hw + 3, -hh * 0.62);
+  ctx.lineTo(-hw - 1, -hh * 0.3);
+  ctx.lineTo(-hw + 1, 0);
+  ctx.lineTo(-hw - 1, hh * 0.3);
+  ctx.lineTo(-hw + 3, hh * 0.62);
+  ctx.lineTo(1, hh + 1);
   ctx.closePath();
   ctx.fill();
   ctx.shadowBlur = 0;
 
-  // 金属装甲层
+  // 金属装甲层（增强3D立体感：顶部更亮，底部更暗）
   var bodyGrad = ctx.createLinearGradient(0, -hh, 0, hh);
-  bodyGrad.addColorStop(0, '#2a5a8a');
-  bodyGrad.addColorStop(0.2, '#1a3a5a');
-  bodyGrad.addColorStop(0.4, '#3a6a9a');
-  bodyGrad.addColorStop(0.6, '#1a3a5a');
-  bodyGrad.addColorStop(0.8, '#2a5a8a');
-  bodyGrad.addColorStop(1, '#1a3a5a');
+  bodyGrad.addColorStop(0, '#4a8acc');
+  bodyGrad.addColorStop(0.15, '#3a6a9a');
+  bodyGrad.addColorStop(0.35, '#2a4a7a');
+  bodyGrad.addColorStop(0.5, '#3a6a9a');
+  bodyGrad.addColorStop(0.65, '#2a4a7a');
+  bodyGrad.addColorStop(0.85, '#1a3a5a');
+  bodyGrad.addColorStop(1, '#0a2a4a');
   ctx.fillStyle = bodyGrad;
   ctx.beginPath();
   ctx.moveTo(hw - 2, 0);
-  ctx.lineTo(2, -hh + 2);
+  ctx.lineTo(3, -hh + 2);
   ctx.lineTo(-hw + 7, -hh * 0.5);
   ctx.lineTo(-hw + 3, -hh * 0.25);
   ctx.lineTo(-hw + 5, 0);
   ctx.lineTo(-hw + 3, hh * 0.25);
   ctx.lineTo(-hw + 7, hh * 0.5);
-  ctx.lineTo(2, hh - 2);
+  ctx.lineTo(3, hh - 2);
   ctx.closePath();
   ctx.fill();
 
-  // 高光边缘
-  ctx.strokeStyle = 'rgba(100,180,255,0.5)';
-  ctx.lineWidth = 1;
+  // 细微装甲纹理线（水平线条分区）
+  ctx.strokeStyle = 'rgba(80,150,220,0.15)';
+  ctx.lineWidth = 0.5;
+  for (var ali = -2; ali <= 2; ali++) {
+    var aly = ali * hh * 0.2;
+    ctx.beginPath();
+    ctx.moveTo(-hw + 8, aly);
+    ctx.lineTo(hw - 6, aly);
+    ctx.stroke();
+  }
+
+  // 机身边缘蓝紫色科幻光条（能量线沿轮廓流动）
+  var edgeFlow = (flame * 0.3) % 1;
+  ctx.strokeStyle = 'rgba(100,120,255,0.55)';
+  ctx.lineWidth = 1.2;
+  ctx.shadowColor = '#6644ff';
+  ctx.shadowBlur = 5;
   ctx.beginPath();
   ctx.moveTo(hw - 2, 0);
-  ctx.lineTo(2, -hh + 2);
+  ctx.lineTo(3, -hh + 2);
   ctx.lineTo(-hw + 7, -hh * 0.5);
-  ctx.lineTo(-hw + 3, hh * 0.5);
-  ctx.lineTo(2, hh - 2);
+  ctx.lineTo(-hw + 3, -hh * 0.25);
+  ctx.lineTo(-hw + 5, 0);
+  ctx.lineTo(-hw + 3, hh * 0.25);
+  ctx.lineTo(-hw + 7, hh * 0.5);
+  ctx.lineTo(3, hh - 2);
   ctx.closePath();
   ctx.stroke();
+  ctx.shadowBlur = 0;
 
-  // 机头科技线条
-  ctx.strokeStyle = 'rgba(0,240,255,0.6)';
+  // 机头更锐利的棱角分明的未来战机感
+  ctx.strokeStyle = 'rgba(0,240,255,0.7)';
   ctx.lineWidth = 1.5;
   ctx.shadowColor = '#00f0ff';
-  ctx.shadowBlur = 6;
+  ctx.shadowBlur = 8;
+  ctx.beginPath();
+  ctx.moveTo(hw + 1, 0);
+  ctx.lineTo(hw - 4, -3);
+  ctx.lineTo(hw - 10, -5);
+  ctx.moveTo(hw + 1, 0);
+  ctx.lineTo(hw - 4, 3);
+  ctx.lineTo(hw - 10, 5);
+  ctx.stroke();
+  // 机头下方锐角
+  ctx.strokeStyle = 'rgba(100,180,255,0.4)';
+  ctx.lineWidth = 1;
+  ctx.shadowBlur = 4;
   ctx.beginPath();
   ctx.moveTo(hw - 2, 0);
-  ctx.lineTo(hw - 8, -4);
+  ctx.lineTo(hw - 12, -2);
   ctx.moveTo(hw - 2, 0);
-  ctx.lineTo(hw - 8, 4);
+  ctx.lineTo(hw - 12, 2);
   ctx.stroke();
   ctx.shadowBlur = 0;
 
   // === 能量核心 ===
-  // 核心光晕
-  var coreGlow = ctx.createRadialGradient(0, 0, 1, 0, 0, 8);
-  coreGlow.addColorStop(0, 'rgba(0,240,255,0.8)');
-  coreGlow.addColorStop(0.3, 'rgba(0,180,255,0.4)');
-  coreGlow.addColorStop(0.7, 'rgba(0,100,255,0.1)');
+  // 核心光晕（更大更亮，紫蓝色系）
+  var coreGlow = ctx.createRadialGradient(0, 0, 1, 0, 0, 14);
+  coreGlow.addColorStop(0, 'rgba(200,150,255,0.9)');
+  coreGlow.addColorStop(0.15, 'rgba(100,120,255,0.7)');
+  coreGlow.addColorStop(0.35, 'rgba(0,150,255,0.4)');
+  coreGlow.addColorStop(0.6, 'rgba(0,80,255,0.15)');
   coreGlow.addColorStop(1, 'transparent');
   ctx.fillStyle = coreGlow;
   ctx.beginPath();
-  ctx.arc(0, 0, 8, 0, Math.PI * 2);
+  ctx.arc(0, 0, 14, 0, Math.PI * 2);
   ctx.fill();
-  // 核心脉动
-  var pulse = 1 + Math.sin(flame * 4) * 0.2;
+  // 核心脉动（呼吸感更强）
+  var pulse = 1 + Math.sin(flame * 4) * 0.3;
   ctx.fillStyle = '#ffffff';
-  ctx.shadowColor = '#00f0ff';
-  ctx.shadowBlur = 8 * pulse;
+  ctx.shadowColor = '#aa88ff';
+  ctx.shadowBlur = 12 * pulse;
   ctx.beginPath();
-  ctx.arc(0, 0, 2.5 * pulse, 0, Math.PI * 2);
+  ctx.arc(0, 0, 3 * pulse, 0, Math.PI * 2);
   ctx.fill();
   ctx.shadowBlur = 0;
+  // 能量涟漪效果（向外扩散的圆环）
+  for (var ri = 0; ri < 2; ri++) {
+    var rippleR = ((flame * 1.5 + ri * 0.5) % 1) * 12 + 4;
+    var rippleA = Math.max(0, 0.3 - rippleR * 0.02);
+    ctx.strokeStyle = 'rgba(120,150,255,' + rippleA + ')';
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.arc(0, 0, rippleR, 0, Math.PI * 2);
+    ctx.stroke();
+  }
 
   // === 机翼动态光线 ===
-  var wingGlow = 0.5 + Math.sin(flame * 2.5) * 0.3;
+  var wingGlow = 0.6 + Math.sin(flame * 2.5) * 0.35;
   ctx.strokeStyle = 'rgba(0,200,255,' + wingGlow + ')';
-  ctx.lineWidth = 1;
+  ctx.lineWidth = 1.8;
   ctx.shadowColor = '#00aaff';
-  ctx.shadowBlur = 4;
+  ctx.shadowBlur = 6;
   // 上翼
   ctx.beginPath();
-  ctx.moveTo(4, -hh * 0.6);
+  ctx.moveTo(5, -hh * 0.6);
   ctx.lineTo(-hw + 8, -hh * 0.45);
   ctx.stroke();
   // 下翼
   ctx.beginPath();
-  ctx.moveTo(4, hh * 0.6);
+  ctx.moveTo(5, hh * 0.6);
   ctx.lineTo(-hw + 8, hh * 0.45);
   ctx.stroke();
   ctx.shadowBlur = 0;
+  // 翼尖闪烁灯效果
+  var tipBlink = Math.sin(flame * 5) > 0.3 ? 1 : 0.2;
+  ctx.fillStyle = 'rgba(0,255,255,' + tipBlink + ')';
+  ctx.shadowColor = '#00ffff';
+  ctx.shadowBlur = 6;
+  ctx.beginPath(); ctx.arc(-hw + 8, -hh * 0.45, 1.5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(-hw + 8, hh * 0.45, 1.5, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+  // 能量从机身向翼尖流动的光线动画
+  var flowPos = (flame * 0.6) % 1;
+  for (var fli = 0; fli < 3; fli++) {
+    var fp = (flowPos + fli * 0.33) % 1;
+    var fAlpha = Math.sin(fp * Math.PI) * 0.5;
+    // 上翼流动
+    var fx1 = 5 + (-hw + 3) * fp;
+    var fy1 = -hh * 0.6 + (hh * 0.15) * fp;
+    ctx.fillStyle = 'rgba(100,220,255,' + fAlpha + ')';
+    ctx.beginPath(); ctx.arc(fx1, fy1, 1.2, 0, Math.PI * 2); ctx.fill();
+    // 下翼流动
+    var fy2 = hh * 0.6 - (hh * 0.15) * fp;
+    ctx.beginPath(); ctx.arc(fx1, fy2, 1.2, 0, Math.PI * 2); ctx.fill();
+  }
 
   // === 驾驶舱 ===
-  var cockpitGrad = ctx.createLinearGradient(0, -3, 0, 3);
-  cockpitGrad.addColorStop(0, '#88ddff');
-  cockpitGrad.addColorStop(0.5, '#aaefff');
+  var cockpitGrad = ctx.createLinearGradient(0, -4, 0, 4);
+  cockpitGrad.addColorStop(0, '#ccf0ff');
+  cockpitGrad.addColorStop(0.3, '#88ddff');
+  cockpitGrad.addColorStop(0.7, '#aaefff');
   cockpitGrad.addColorStop(1, '#4488cc');
   ctx.fillStyle = cockpitGrad;
   ctx.shadowColor = '#00ccff';
-  ctx.shadowBlur = 3;
+  ctx.shadowBlur = 6;
   ctx.beginPath();
-  ctx.ellipse(4, 0, 4, 2.5, 0, 0, Math.PI * 2);
+  ctx.ellipse(5, 0, 5, 3, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.shadowBlur = 0;
+  // HUD投影效果（微型光条）
+  ctx.strokeStyle = 'rgba(0,240,255,0.5)';
+  ctx.lineWidth = 0.6;
+  ctx.beginPath();
+  ctx.moveTo(2, -1.5); ctx.lineTo(8, -1.5);
+  ctx.moveTo(2, 1.5); ctx.lineTo(8, 1.5);
+  ctx.stroke();
 
   // === 能量护盾 ===
   if (this.shield > 0 && full) {
-    var shieldAlpha = 0.15 + 0.08 * Math.sin(flame * 2);
-    var shieldPulse = 1 + Math.sin(flame * 3) * 0.05;
+    var shieldAlpha = 0.2 + 0.1 * Math.sin(flame * 2);
+    var shieldPulse = 1 + Math.sin(flame * 3) * 0.06;
     // 外层护盾
     ctx.strokeStyle = 'rgba(0,200,255,' + shieldAlpha + ')';
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 2.5;
     ctx.shadowColor = '#00ccff';
-    ctx.shadowBlur = 12;
+    ctx.shadowBlur = 16;
     ctx.beginPath();
-    ctx.ellipse(0, 0, hw * 1.2 * shieldPulse, hh * 1.1 * shieldPulse, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, 0, hw * 1.25 * shieldPulse, hh * 1.15 * shieldPulse, 0, 0, Math.PI * 2);
     ctx.stroke();
-    // 内层护盾六边形
-    ctx.strokeStyle = 'rgba(0,180,255,' + (shieldAlpha * 0.7) + ')';
-    ctx.lineWidth = 1;
-    ctx.shadowBlur = 6;
+    ctx.shadowBlur = 0;
+    // 六角形网格纹理护盾
+    var srx = hw * 1.1 * shieldPulse, sry = hh * 1.05 * shieldPulse;
+    ctx.strokeStyle = 'rgba(0,180,255,' + (shieldAlpha * 0.5) + ')';
+    ctx.lineWidth = 0.7;
+    // 外六角
     ctx.beginPath();
     for (var si = 0; si < 6; si++) {
       var sa = Math.PI / 3 * si - Math.PI / 2;
-      var sr = hw * 1.05 * shieldPulse;
-      var sx = Math.cos(sa) * sr, sy = Math.sin(sa) * sr;
+      var sx = Math.cos(sa) * srx, sy = Math.sin(sa) * sry;
       ctx[si === 0 ? 'moveTo' : 'lineTo'](sx, sy);
     }
     ctx.closePath();
     ctx.stroke();
+    // 内六角网格
+    ctx.strokeStyle = 'rgba(80,160,255,' + (shieldAlpha * 0.35) + ')';
+    for (var si2 = 0; si2 < 6; si2++) {
+      var sa2 = Math.PI / 3 * si2 - Math.PI / 2;
+      var ox1 = Math.cos(sa2) * srx, oy1 = Math.sin(sa2) * sry;
+      var sa3 = Math.PI / 3 * ((si2 + 1) % 6) - Math.PI / 2;
+      var ox2 = Math.cos(sa3) * srx, oy2 = Math.sin(sa3) * sry;
+      var mx = (ox1 + ox2) / 2, my = (oy1 + oy2) / 2;
+      ctx.beginPath();
+      ctx.moveTo(0, 0); ctx.lineTo(mx, my);
+      ctx.stroke();
+    }
+    // 护盾表面能量流动波纹
+    for (var swi = 0; swi < 3; swi++) {
+      var swPhase = (flame * 0.8 + swi * 0.33) % 1;
+      var swR = 0.4 + swPhase * 0.6;
+      var swA = Math.sin(swPhase * Math.PI) * shieldAlpha * 0.5;
+      ctx.strokeStyle = 'rgba(100,200,255,' + swA + ')';
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, srx * swR, sry * swR, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    // 受击闪烁（利用shield刚被击中的时刻判断）
     ctx.shadowBlur = 0;
   }
 
@@ -1921,19 +2859,37 @@ Enemy.prototype.render = function(ctx) {
     ctx.globalAlpha = 1;
   }
 
-  // 推进器火焰（敌机向右飞，火焰在右侧）
-  var flameLen = 4 + Math.sin(t * 6) * 2;
+  // 推进器火焰（敌机向右飞，火焰在右侧，升级版）
+  var flameLen = 6 + Math.sin(t * 6) * 3;
+  // 外层光晕
+  ctx.fillStyle = 'rgba(255,80,40,0.08)';
+  ctx.beginPath();
+  ctx.ellipse(hw + 3, 0, flameLen * 0.8, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
   var fg = ctx.createLinearGradient(hw, 0, hw + flameLen, 0);
   fg.addColorStop(0, this.color);
-  fg.addColorStop(0.5, this.color + '88');
+  fg.addColorStop(0.3, this.color + 'cc');
+  fg.addColorStop(0.6, this.color + '55');
   fg.addColorStop(1, 'transparent');
   ctx.fillStyle = fg;
   ctx.beginPath();
-  ctx.moveTo(hw, -3);
-  ctx.lineTo(hw + flameLen, -1 + Math.sin(t * 8) * 1);
+  ctx.moveTo(hw, -4);
+  ctx.lineTo(hw + flameLen, -1.5 + Math.sin(t * 8) * 1.5);
   ctx.lineTo(hw + flameLen * 0.7, 0);
-  ctx.lineTo(hw + flameLen, 1 - Math.sin(t * 8) * 1);
-  ctx.lineTo(hw, 3);
+  ctx.lineTo(hw + flameLen, 1.5 - Math.sin(t * 8) * 1.5);
+  ctx.lineTo(hw, 4);
+  ctx.closePath();
+  ctx.fill();
+  // 火焰内核
+  var fg2 = ctx.createLinearGradient(hw, 0, hw + flameLen * 0.5, 0);
+  fg2.addColorStop(0, '#ffffff');
+  fg2.addColorStop(0.3, this.color);
+  fg2.addColorStop(1, 'transparent');
+  ctx.fillStyle = fg2;
+  ctx.beginPath();
+  ctx.moveTo(hw, -2);
+  ctx.lineTo(hw + flameLen * 0.5, Math.sin(t * 10) * 0.8);
+  ctx.lineTo(hw, 2);
   ctx.closePath();
   ctx.fill();
 
@@ -1958,92 +2914,186 @@ Enemy.prototype.render = function(ctx) {
   ctx.restore();
 };
 
-// 侦察机 - 小型无人战斗机
+// 侦察机 - 小型无人战斗机（外星科技升级版）
 Enemy.prototype._renderScout = function(ctx, w, h, t) {
   var hw = w / 2, hh = h / 2;
-  // 金属外壳
+  // 更尖锐的外星机械造型
   var grad = ctx.createLinearGradient(0, -hh, 0, hh);
-  grad.addColorStop(0, '#3a1a1a');
-  grad.addColorStop(0.3, '#5a2a2a');
-  grad.addColorStop(0.5, '#7a3a3a');
-  grad.addColorStop(0.7, '#5a2a2a');
-  grad.addColorStop(1, '#3a1a1a');
+  grad.addColorStop(0, '#4a2020');
+  grad.addColorStop(0.25, '#6a3030');
+  grad.addColorStop(0.5, '#8a4040');
+  grad.addColorStop(0.75, '#5a2828');
+  grad.addColorStop(1, '#3a1818');
   ctx.fillStyle = grad;
   ctx.shadowColor = '#ff4466';
-  ctx.shadowBlur = 4;
+  ctx.shadowBlur = 6;
   ctx.beginPath();
-  ctx.moveTo(-hw, 0);
-  ctx.lineTo(0, -hh);
-  ctx.lineTo(hw, -hh * 0.3);
-  ctx.lineTo(hw, hh * 0.3);
-  ctx.lineTo(0, hh);
+  ctx.moveTo(-hw - 2, 0);
+  ctx.lineTo(-2, -hh - 1);
+  ctx.lineTo(hw * 0.3, -hh * 0.7);
+  ctx.lineTo(hw, -hh * 0.25);
+  ctx.lineTo(hw, hh * 0.25);
+  ctx.lineTo(hw * 0.3, hh * 0.7);
+  ctx.lineTo(-2, hh + 1);
   ctx.closePath();
   ctx.fill();
   ctx.shadowBlur = 0;
-  // 红色能量核心
-  var coreGlow = ctx.createRadialGradient(0, 0, 0, 0, 0, 3);
-  coreGlow.addColorStop(0, '#ff4444');
-  coreGlow.addColorStop(0.5, '#ff2222');
+  // 装甲线条
+  ctx.strokeStyle = 'rgba(140,60,60,0.4)';
+  ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(-hw + 2, -hh * 0.3); ctx.lineTo(hw - 2, -hh * 0.3);
+  ctx.moveTo(-hw + 2, hh * 0.3); ctx.lineTo(hw - 2, hh * 0.3);
+  ctx.stroke();
+  // 薄翼展开效果
+  ctx.fillStyle = 'rgba(120,40,40,0.35)';
+  ctx.beginPath();
+  ctx.moveTo(0, -hh);
+  ctx.lineTo(hw * 0.8, -hh * 0.6);
+  ctx.lineTo(hw * 0.3, -hh * 0.4);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(0, hh);
+  ctx.lineTo(hw * 0.8, hh * 0.6);
+  ctx.lineTo(hw * 0.3, hh * 0.4);
+  ctx.closePath();
+  ctx.fill();
+  // 红色能量核心（更亮，脉冲环）
+  var coreGlow = ctx.createRadialGradient(0, 0, 0, 0, 0, 5);
+  coreGlow.addColorStop(0, '#ff6666');
+  coreGlow.addColorStop(0.3, '#ff3333');
+  coreGlow.addColorStop(0.6, '#cc1111');
   coreGlow.addColorStop(1, 'transparent');
   ctx.fillStyle = coreGlow;
-  ctx.beginPath(); ctx.arc(0, 0, 3, 0, Math.PI * 2); ctx.fill();
-  // 边缘光
-  ctx.strokeStyle = 'rgba(255,100,100,0.4)';
-  ctx.lineWidth = 0.8;
+  ctx.beginPath(); ctx.arc(0, 0, 5, 0, Math.PI * 2); ctx.fill();
+  // 脉冲环
+  var sp = (t * 2) % 1;
+  ctx.strokeStyle = 'rgba(255,80,80,' + (0.5 * (1 - sp)) + ')';
+  ctx.lineWidth = 0.6;
+  ctx.beginPath(); ctx.arc(0, 0, 3 + sp * 6, 0, Math.PI * 2); ctx.stroke();
+  // 扫描线/定位光效果
+  var scanA = Math.sin(t * 4) * 0.4;
+  ctx.strokeStyle = 'rgba(255,150,150,' + Math.abs(scanA) + ')';
+  ctx.lineWidth = 0.6;
   ctx.beginPath();
-  ctx.moveTo(-hw, 0); ctx.lineTo(0, -hh); ctx.lineTo(hw, -hh * 0.3);
-  ctx.moveTo(hw, hh * 0.3); ctx.lineTo(0, hh); ctx.lineTo(-hw, 0);
+  ctx.moveTo(-hw, -hh * 0.5); ctx.lineTo(hw, -hh * 0.5);
+  ctx.moveTo(-hw, hh * 0.5); ctx.lineTo(hw, hh * 0.5);
   ctx.stroke();
+  // 边缘光（更亮）
+  ctx.strokeStyle = 'rgba(255,100,100,0.55)';
+  ctx.lineWidth = 1;
+  ctx.shadowColor = '#ff4466';
+  ctx.shadowBlur = 3;
+  ctx.beginPath();
+  ctx.moveTo(-hw - 2, 0); ctx.lineTo(-2, -hh - 1); ctx.lineTo(hw * 0.3, -hh * 0.7); ctx.lineTo(hw, -hh * 0.25);
+  ctx.moveTo(hw, hh * 0.25); ctx.lineTo(hw * 0.3, hh * 0.7); ctx.lineTo(-2, hh + 1); ctx.lineTo(-hw - 2, 0);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
 };
 
-// 战斗机 - 中型装甲
+// 战斗机 - 中型装甲（外星战舰升级版）
 Enemy.prototype._renderFighter = function(ctx, w, h, t) {
   var hw = w / 2, hh = h / 2;
+  // 更大的X形翼展开
   var grad = ctx.createLinearGradient(0, -hh, 0, hh);
-  grad.addColorStop(0, '#1a2a4a');
-  grad.addColorStop(0.3, '#2a4a7a');
-  grad.addColorStop(0.5, '#3a5a9a');
-  grad.addColorStop(0.7, '#2a4a7a');
+  grad.addColorStop(0, '#2a3a6a');
+  grad.addColorStop(0.2, '#3a5a9a');
+  grad.addColorStop(0.4, '#4a6aaa');
+  grad.addColorStop(0.6, '#3a5a9a');
+  grad.addColorStop(0.8, '#2a4a7a');
   grad.addColorStop(1, '#1a2a4a');
   ctx.fillStyle = grad;
   ctx.shadowColor = '#4488ff';
-  ctx.shadowBlur = 6;
+  ctx.shadowBlur = 8;
   ctx.beginPath();
-  ctx.moveTo(-hw, -hh * 0.2);
-  ctx.lineTo(0, -hh);
-  ctx.lineTo(hw, -hh * 0.5);
-  ctx.lineTo(hw * 0.7, 0);
-  ctx.lineTo(hw, hh * 0.5);
-  ctx.lineTo(0, hh);
-  ctx.lineTo(-hw, hh * 0.2);
+  ctx.moveTo(-hw - 2, -hh * 0.15);
+  ctx.lineTo(-hw * 0.3, -hh - 1);
+  ctx.lineTo(hw * 0.3, -hh - 1);
+  ctx.lineTo(hw + 1, -hh * 0.5);
+  ctx.lineTo(hw * 0.65, 0);
+  ctx.lineTo(hw + 1, hh * 0.5);
+  ctx.lineTo(hw * 0.3, hh + 1);
+  ctx.lineTo(-hw * 0.3, hh + 1);
+  ctx.lineTo(-hw - 2, hh * 0.15);
   ctx.closePath();
   ctx.fill();
   ctx.shadowBlur = 0;
-  // 发光线路
-  ctx.strokeStyle = 'rgba(100,180,255,' + (0.4 + Math.sin(t * 3) * 0.2) + ')';
+  // 装甲板分割（更厚重）
+  ctx.strokeStyle = 'rgba(80,130,200,0.35)';
+  ctx.lineWidth = 0.6;
+  ctx.beginPath();
+  ctx.moveTo(-hw, -hh * 0.3); ctx.lineTo(hw, -hh * 0.3);
+  ctx.moveTo(-hw, hh * 0.3); ctx.lineTo(hw, hh * 0.3);
+  ctx.moveTo(-hw * 0.5, 0); ctx.lineTo(hw * 0.5, 0);
+  ctx.stroke();
+  // 多条发光线路（蓝色系，网络状）
+  var lineA = 0.5 + Math.sin(t * 3) * 0.25;
+  ctx.strokeStyle = 'rgba(100,180,255,' + lineA + ')';
   ctx.lineWidth = 1;
   ctx.shadowColor = '#4488ff';
-  ctx.shadowBlur = 3;
+  ctx.shadowBlur = 4;
   ctx.beginPath();
-  ctx.moveTo(0, -hh * 0.5); ctx.lineTo(0, hh * 0.5);
+  ctx.moveTo(-hw * 0.6, -hh * 0.4); ctx.lineTo(hw * 0.6, -hh * 0.4);
+  ctx.moveTo(-hw * 0.6, hh * 0.4); ctx.lineTo(hw * 0.6, hh * 0.4);
+  ctx.moveTo(0, -hh * 0.6); ctx.lineTo(0, hh * 0.6);
+  ctx.stroke();
+  // 交叉能量线
+  ctx.strokeStyle = 'rgba(120,200,255,' + (lineA * 0.6) + ')';
+  ctx.lineWidth = 0.7;
+  ctx.beginPath();
+  ctx.moveTo(-hw * 0.5, -hh * 0.5); ctx.lineTo(hw * 0.5, hh * 0.5);
+  ctx.moveTo(-hw * 0.5, hh * 0.5); ctx.lineTo(hw * 0.5, -hh * 0.5);
   ctx.stroke();
   ctx.shadowBlur = 0;
-  // 能量核心
-  ctx.fillStyle = '#88ccff';
+  // 能量传输线动画
+  var flowP = (t * 1.5) % 1;
+  for (var fi = 0; fi < 2; fi++) {
+    var fp2 = (flowP + fi * 0.5) % 1;
+    var fa = Math.sin(fp2 * Math.PI) * 0.6;
+    var fx2 = -hw * 0.6 + hw * 1.2 * fp2;
+    ctx.fillStyle = 'rgba(150,220,255,' + fa + ')';
+    ctx.beginPath(); ctx.arc(fx2, -hh * 0.4, 1, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(fx2, hh * 0.4, 1, 0, Math.PI * 2); ctx.fill();
+  }
+  // 双核心发光（蓝色）
+  for (var ci = -1; ci <= 1; ci += 2) {
+    var cy2 = ci * hh * 0.35;
+    var cGlow = ctx.createRadialGradient(0, cy2, 0, 0, cy2, 4);
+    cGlow.addColorStop(0, '#aaddff');
+    cGlow.addColorStop(0.4, '#4488ff');
+    cGlow.addColorStop(1, 'transparent');
+    ctx.fillStyle = cGlow;
+    ctx.beginPath(); ctx.arc(0, cy2, 4, 0, Math.PI * 2); ctx.fill();
+  }
+  // 中心核心亮点
+  ctx.fillStyle = '#ffffff';
   ctx.shadowColor = '#4488ff';
-  ctx.shadowBlur = 4;
-  ctx.beginPath(); ctx.arc(0, 0, 2.5, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 6;
+  ctx.beginPath(); ctx.arc(0, 0, 1.5, 0, Math.PI * 2); ctx.fill();
   ctx.shadowBlur = 0;
 };
 
-// 坦克 - 重型装甲
+// 坦克 - 重型装甲（六边形堡垒升级版）
 Enemy.prototype._renderTank = function(ctx, w, h, t) {
   var hw = w / 2, hh = h / 2;
+  // 阴影底层（3D立体感）
+  ctx.fillStyle = '#1a0a22';
+  ctx.beginPath();
+  for (var si = 0; si < 6; si++) {
+    var sa = Math.PI / 3 * si - Math.PI / 2;
+    var sr = hw + 2;
+    ctx[si === 0 ? 'moveTo' : 'lineTo'](Math.cos(sa) * sr, Math.sin(sa) * sr);
+  }
+  ctx.closePath();
+  ctx.fill();
+  // 六边形装甲板（有立体凸起效果）
   for (var i = 0; i < 6; i++) {
     var a = Math.PI / 3 * i - Math.PI / 2;
     var r = hw;
     var x = Math.cos(a) * r, y = Math.sin(a) * r;
-    ctx.fillStyle = i === 0 ? '#553388' : '#332255';
+    var bright = i % 2 === 0;
+    ctx.fillStyle = bright ? '#664499' : '#442277';
     ctx.shadowColor = '#aa44ff';
     ctx.shadowBlur = 6;
     ctx.beginPath();
@@ -2054,9 +3104,11 @@ Enemy.prototype._renderTank = function(ctx, w, h, t) {
     ctx.fill();
   }
   ctx.shadowBlur = 0;
-  // 六边形边框
-  ctx.strokeStyle = 'rgba(170,100,255,0.5)';
-  ctx.lineWidth = 1.5;
+  // 六边形边框（更粗更亮）
+  ctx.strokeStyle = 'rgba(180,120,255,0.6)';
+  ctx.lineWidth = 2;
+  ctx.shadowColor = '#bb66ff';
+  ctx.shadowBlur = 4;
   ctx.beginPath();
   for (var j = 0; j < 6; j++) {
     var a2 = Math.PI / 3 * j - Math.PI / 2;
@@ -2064,115 +3116,288 @@ Enemy.prototype._renderTank = function(ctx, w, h, t) {
     ctx[j === 0 ? 'moveTo' : 'lineTo'](Math.cos(a2) * r2, Math.sin(a2) * r2);
   }
   ctx.closePath(); ctx.stroke();
-  // 发光线路
-  ctx.strokeStyle = 'rgba(200,150,255,' + (0.5 + Math.sin(t * 2) * 0.2) + ')';
+  ctx.shadowBlur = 0;
+  // 复杂能量网（更多发光线路）
+  var lineA2 = 0.5 + Math.sin(t * 2) * 0.2;
+  ctx.strokeStyle = 'rgba(200,150,255,' + lineA2 + ')';
   ctx.lineWidth = 1;
   ctx.shadowColor = '#aa44ff';
   ctx.shadowBlur = 4;
-  for (var k = 0; k < 3; k++) {
-    var la = Math.PI / 3 * (k * 2) - Math.PI / 2;
+  for (var k = 0; k < 6; k++) {
+    var la = Math.PI / 3 * k - Math.PI / 2;
     ctx.beginPath();
     ctx.moveTo(0, 0);
-    ctx.lineTo(Math.cos(la) * hw * 0.8, Math.sin(la) * hw * 0.8);
+    ctx.lineTo(Math.cos(la) * hw * 0.85, Math.sin(la) * hw * 0.85);
     ctx.stroke();
   }
+  // 中环能量线
+  ctx.strokeStyle = 'rgba(180,130,255,' + (lineA2 * 0.6) + ')';
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  for (var mi = 0; mi < 6; mi++) {
+    var ma = Math.PI / 3 * mi - Math.PI / 2;
+    var mx2 = Math.cos(ma) * hw * 0.55, my2 = Math.sin(ma) * hw * 0.55;
+    ctx[mi === 0 ? 'moveTo' : 'lineTo'](mx2, my2);
+  }
+  ctx.closePath(); ctx.stroke();
   ctx.shadowBlur = 0;
+  // 紫色核心（更大更亮，旋转光圈）
+  var coreGlow2 = ctx.createRadialGradient(0, 0, 0, 0, 0, 7);
+  coreGlow2.addColorStop(0, '#dd88ff');
+  coreGlow2.addColorStop(0.3, '#aa44ff');
+  coreGlow2.addColorStop(0.6, '#7722cc');
+  coreGlow2.addColorStop(1, 'transparent');
+  ctx.fillStyle = coreGlow2;
+  ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI * 2); ctx.fill();
+  // 旋转光圈
+  for (var ri2 = 0; ri2 < 3; ri2++) {
+    var ra = t * 3 + ri2 * Math.PI * 2 / 3;
+    ctx.strokeStyle = 'rgba(200,150,255,0.4)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(0, 0, 5, ra, ra + 0.8);
+    ctx.stroke();
+  }
+  // 装甲板能量充盈脉动
+  var pulseA = 0.15 + Math.sin(t * 3) * 0.1;
+  ctx.fillStyle = 'rgba(170,100,255,' + pulseA + ')';
+  ctx.beginPath();
+  for (var pi2 = 0; pi2 < 6; pi2++) {
+    var pa = Math.PI / 3 * pi2 - Math.PI / 2;
+    ctx[pi2 === 0 ? 'moveTo' : 'lineTo'](Math.cos(pa) * hw * 0.9, Math.sin(pa) * hw * 0.9);
+  }
+  ctx.closePath(); ctx.fill();
+  // 防御光幕效果
+  ctx.strokeStyle = 'rgba(150,80,255,0.15)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (var di = 0; di < 6; di++) {
+    var da = Math.PI / 3 * di - Math.PI / 2;
+    ctx[di === 0 ? 'moveTo' : 'lineTo'](Math.cos(da) * (hw + 4), Math.sin(da) * (hw + 4));
+  }
+  ctx.closePath(); ctx.stroke();
 };
 
-// 狙击手 - 修长型
+// 狙击手 - 修长型（深空狙击舰升级版）
 Enemy.prototype._renderSniper = function(ctx, w, h, t) {
   var hw = w / 2, hh = h / 2;
+  // 更修长流线的外形
   var grad = ctx.createLinearGradient(-hw, 0, hw, 0);
   grad.addColorStop(0, '#1a0505');
-  grad.addColorStop(0.3, '#3a0a0a');
-  grad.addColorStop(0.5, '#5a1010');
-  grad.addColorStop(0.7, '#3a0a0a');
+  grad.addColorStop(0.2, '#2a0808');
+  grad.addColorStop(0.4, '#4a1212');
+  grad.addColorStop(0.6, '#5a1515');
+  grad.addColorStop(0.8, '#3a0a0a');
   grad.addColorStop(1, '#1a0505');
   ctx.fillStyle = grad;
   ctx.shadowColor = '#ff2244';
-  ctx.shadowBlur = 5;
+  ctx.shadowBlur = 6;
   ctx.beginPath();
-  ctx.moveTo(-hw, -hh * 0.3);
-  ctx.lineTo(-hw * 0.5, -hh);
-  ctx.lineTo(hw * 0.5, -hh * 0.5);
-  ctx.lineTo(hw, 0);
-  ctx.lineTo(hw * 0.5, hh * 0.5);
-  ctx.lineTo(-hw * 0.5, hh);
-  ctx.lineTo(-hw, hh * 0.3);
+  ctx.moveTo(-hw - 3, 0);
+  ctx.lineTo(-hw * 0.5, -hh - 1);
+  ctx.lineTo(hw * 0.4, -hh * 0.5);
+  ctx.lineTo(hw + 2, 0);
+  ctx.lineTo(hw * 0.4, hh * 0.5);
+  ctx.lineTo(-hw * 0.5, hh + 1);
   ctx.closePath();
   ctx.fill();
   ctx.shadowBlur = 0;
-  // 狙击镜线
-  ctx.strokeStyle = 'rgba(255,100,100,0.6)';
-  ctx.lineWidth = 1;
+  // 流线装甲纹理
+  ctx.strokeStyle = 'rgba(100,30,30,0.4)';
+  ctx.lineWidth = 0.5;
   ctx.beginPath();
-  ctx.moveTo(hw, 0); ctx.lineTo(hw - 6, 0);
+  ctx.moveTo(-hw, -hh * 0.4); ctx.lineTo(hw, -hh * 0.3);
+  ctx.moveTo(-hw, hh * 0.4); ctx.lineTo(hw, hh * 0.3);
+  ctx.stroke();
+  // 深红色能量集中在前端
+  var frontGlow = ctx.createRadialGradient(hw * 0.3, 0, 0, hw * 0.3, 0, 5);
+  frontGlow.addColorStop(0, '#ff4455');
+  frontGlow.addColorStop(0.4, '#cc2233');
+  frontGlow.addColorStop(1, 'transparent');
+  ctx.fillStyle = frontGlow;
+  ctx.beginPath(); ctx.arc(hw * 0.3, 0, 5, 0, Math.PI * 2); ctx.fill();
+  // 瞄准激光线效果（向前延伸的红色细线）
+  ctx.strokeStyle = 'rgba(255,50,50,' + (0.5 + Math.sin(t * 5) * 0.3) + ')';
+  ctx.lineWidth = 0.8;
+  ctx.shadowColor = '#ff2244';
+  ctx.shadowBlur = 4;
+  ctx.beginPath();
+  ctx.moveTo(hw, 0); ctx.lineTo(hw + 20, 0);
+  ctx.stroke();
+  // 瞄准激光点
+  ctx.fillStyle = 'rgba(255,80,80,' + (0.6 + Math.sin(t * 5) * 0.3) + ')';
+  ctx.beginPath(); ctx.arc(hw + 20, 0, 1, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+  // 能量蓄积脉动效果
+  var chargePulse = Math.sin(t * 4) * 0.5 + 0.5;
+  ctx.strokeStyle = 'rgba(255,60,60,' + (chargePulse * 0.3) + ')';
+  ctx.lineWidth = 0.6;
+  ctx.beginPath(); ctx.arc(hw * 0.3, 0, 3 + chargePulse * 3, 0, Math.PI * 2); ctx.stroke();
+  // 光学迷彩边缘（半透明闪烁）
+  var camoA = 0.1 + Math.sin(t * 6) * 0.08;
+  ctx.strokeStyle = 'rgba(255,100,100,' + camoA + ')';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(-hw - 3, 0); ctx.lineTo(-hw * 0.5, -hh - 1); ctx.lineTo(hw * 0.4, -hh * 0.5); ctx.lineTo(hw + 2, 0);
+  ctx.lineTo(hw * 0.4, hh * 0.5); ctx.lineTo(-hw * 0.5, hh + 1); ctx.closePath();
   ctx.stroke();
 };
 
-// 神风 - 尖刺型
+// 神风 - 尖刺型（突击舰升级版）
 Enemy.prototype._renderKamikaze = function(ctx, w, h, t) {
   var hw = w / 2, hh = h / 2;
   var flicker = 0.6 + Math.sin(t * 10) * 0.4;
-  ctx.fillStyle = '#331100';
+  // 更尖锐的突击形态
+  var grad = ctx.createLinearGradient(-hw, 0, hw, 0);
+  grad.addColorStop(0, '#441100');
+  grad.addColorStop(0.3, '#552200');
+  grad.addColorStop(0.6, '#441100');
+  grad.addColorStop(1, '#331100');
+  ctx.fillStyle = grad;
   ctx.beginPath();
-  ctx.moveTo(-hw, 0);
-  ctx.lineTo(0, -hh);
+  ctx.moveTo(-hw - 3, 0);
+  ctx.lineTo(-2, -hh - 1);
   ctx.lineTo(hw, -hh * 0.2);
   ctx.lineTo(hw, hh * 0.2);
-  ctx.lineTo(0, hh);
+  ctx.lineTo(-2, hh + 1);
   ctx.closePath();
   ctx.fill();
-  // 尖刺
-  ctx.fillStyle = '#ff6600';
-  ctx.shadowColor = '#ff8800';
-  ctx.shadowBlur = 8 * flicker;
+  // 全身能量过载效果（线条闪烁）
+  ctx.strokeStyle = 'rgba(255,140,0,' + (flicker * 0.5) + ')';
+  ctx.lineWidth = 0.8;
   ctx.beginPath();
-  ctx.moveTo(-hw, 0);
-  ctx.lineTo(-hw - 4, -3);
-  ctx.lineTo(-hw, -3);
+  ctx.moveTo(-hw, -hh * 0.4); ctx.lineTo(hw, -hh * 0.15);
+  ctx.moveTo(-hw, hh * 0.4); ctx.lineTo(hw, hh * 0.15);
+  ctx.moveTo(-hw * 0.5, 0); ctx.lineTo(hw * 0.5, 0);
+  ctx.stroke();
+  // 尖刺（更强发光，蓄力感）
+  ctx.fillStyle = '#ff8800';
+  ctx.shadowColor = '#ffaa00';
+  ctx.shadowBlur = 12 * flicker;
+  ctx.beginPath();
+  ctx.moveTo(-hw - 3, 0);
+  ctx.lineTo(-hw - 7, -4);
+  ctx.lineTo(-hw - 1, -3);
   ctx.closePath();
   ctx.fill();
   ctx.beginPath();
-  ctx.moveTo(-hw, 0);
-  ctx.lineTo(-hw - 4, 3);
-  ctx.lineTo(-hw, 3);
+  ctx.moveTo(-hw - 3, 0);
+  ctx.lineTo(-hw - 7, 4);
+  ctx.lineTo(-hw - 1, 3);
+  ctx.closePath();
+  ctx.fill();
+  // 中间尖刺
+  ctx.fillStyle = '#ffcc44';
+  ctx.beginPath();
+  ctx.moveTo(-hw - 3, 0);
+  ctx.lineTo(-hw - 9, 0);
+  ctx.lineTo(-hw - 1, -1);
+  ctx.lineTo(-hw - 1, 1);
   ctx.closePath();
   ctx.fill();
   ctx.shadowBlur = 0;
-  // 能量核心
-  var core = ctx.createRadialGradient(0, 0, 0, 0, 0, 4);
-  core.addColorStop(0, '#ff8800');
-  core.addColorStop(0.5, '#ff4400');
+  // 橙色能量核心（剧烈闪烁）
+  var core = ctx.createRadialGradient(0, 0, 0, 0, 0, 5);
+  core.addColorStop(0, '#ffcc44');
+  core.addColorStop(0.3, '#ff8800');
+  core.addColorStop(0.6, '#ff4400');
   core.addColorStop(1, 'transparent');
   ctx.fillStyle = core;
-  ctx.beginPath(); ctx.arc(0, 0, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(0, 0, 5, 0, Math.PI * 2); ctx.fill();
+  // 核心亮点
+  ctx.fillStyle = '#ffffff';
+  ctx.shadowColor = '#ffaa00';
+  ctx.shadowBlur = 6 * flicker;
+  ctx.beginPath(); ctx.arc(0, 0, 1.5, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+  // 速度线/尾迹效果
+  for (var ti = 0; ti < 3; ti++) {
+    var tx = hw + 3 + ti * 5;
+    var ta = 0.15 - ti * 0.04;
+    ctx.strokeStyle = 'rgba(255,150,50,' + ta + ')';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(tx, -1 - ti * 0.5);
+    ctx.lineTo(tx + 4, -1 - ti * 0.5);
+    ctx.moveTo(tx, 1 + ti * 0.5);
+    ctx.lineTo(tx + 4, 1 + ti * 0.5);
+    ctx.stroke();
+  }
 };
 
-// 轰炸机 - 方形装甲
+// 轰炸机 - 方形装甲（重装轰炸舰升级版）
 Enemy.prototype._renderBomber = function(ctx, w, h, t) {
   var hw = w / 2, hh = h / 2;
+  // 更方正厚重的装甲
   var grad = ctx.createLinearGradient(0, -hh, 0, hh);
-  grad.addColorStop(0, '#1a3a1a');
-  grad.addColorStop(0.3, '#2a5a2a');
-  grad.addColorStop(0.5, '#3a7a3a');
-  grad.addColorStop(0.7, '#2a5a2a');
+  grad.addColorStop(0, '#1a4a1a');
+  grad.addColorStop(0.2, '#2a6a2a');
+  grad.addColorStop(0.4, '#3a8a3a');
+  grad.addColorStop(0.6, '#2a6a2a');
+  grad.addColorStop(0.8, '#2a5a2a');
   grad.addColorStop(1, '#1a3a1a');
   ctx.fillStyle = grad;
   ctx.shadowColor = '#44ff44';
-  ctx.shadowBlur = 5;
-  ctx.fillRect(-hw, -hh, w, h);
+  ctx.shadowBlur = 6;
+  // 方形主体（略微梯形增加厚重感）
+  ctx.beginPath();
+  ctx.moveTo(-hw - 1, -hh * 0.8);
+  ctx.lineTo(hw + 1, -hh - 1);
+  ctx.lineTo(hw + 1, hh + 1);
+  ctx.lineTo(-hw - 1, hh * 0.8);
+  ctx.closePath();
+  ctx.fill();
   ctx.shadowBlur = 0;
-  // 装甲板线
-  ctx.strokeStyle = 'rgba(100,255,100,0.3)';
-  ctx.lineWidth = 0.8;
+  // 装甲板能量锁定光条
+  ctx.strokeStyle = 'rgba(100,255,100,0.4)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
   ctx.strokeRect(-hw + 2, -hh + 2, w - 4, h - 4);
-  // 能量核心
-  ctx.fillStyle = '#88ff88';
+  ctx.strokeStyle = 'rgba(80,200,80,0.25)';
+  ctx.lineWidth = 0.6;
+  ctx.beginPath();
+  ctx.strokeRect(-hw + 5, -hh + 5, w - 10, h - 10);
+  // 水平装甲分割线
+  ctx.strokeStyle = 'rgba(100,255,100,0.2)';
+  ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(-hw, 0); ctx.lineTo(hw, 0);
+  ctx.moveTo(-hw, -hh * 0.5); ctx.lineTo(hw, -hh * 0.5);
+  ctx.moveTo(-hw, hh * 0.5); ctx.lineTo(hw, hh * 0.5);
+  ctx.stroke();
+  // 水平稳定翼
+  ctx.fillStyle = '#1a4a1a';
+  ctx.beginPath();
+  ctx.moveTo(hw, -hh);
+  ctx.lineTo(hw + 4, -hh - 3);
+  ctx.lineTo(hw + 4, -hh + 2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(hw, hh);
+  ctx.lineTo(hw + 4, hh + 3);
+  ctx.lineTo(hw + 4, hh - 2);
+  ctx.closePath();
+  ctx.fill();
+  // 绿色核心（弹仓发光）
+  var coreGlow3 = ctx.createRadialGradient(0, 0, 0, 0, 0, 5);
+  coreGlow3.addColorStop(0, '#aaffaa');
+  coreGlow3.addColorStop(0.3, '#66ff66');
+  coreGlow3.addColorStop(0.6, '#44cc44');
+  coreGlow3.addColorStop(1, 'transparent');
+  ctx.fillStyle = coreGlow3;
+  ctx.beginPath(); ctx.arc(0, 0, 5, 0, Math.PI * 2); ctx.fill();
+  // 底部弹仓门效果
+  ctx.fillStyle = 'rgba(80,255,80,0.3)';
   ctx.shadowColor = '#44ff44';
-  ctx.shadowBlur = 4;
-  ctx.beginPath(); ctx.arc(0, 0, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 3;
+  ctx.fillRect(-hw * 0.5, hh - 4, hw, 2);
   ctx.shadowBlur = 0;
+  // 弹仓指示灯
+  var bombPulse = Math.sin(t * 3) * 0.5 + 0.5;
+  ctx.fillStyle = 'rgba(100,255,100,' + (bombPulse * 0.6) + ')';
+  ctx.beginPath(); ctx.arc(-hw * 0.3, hh - 3, 1, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(hw * 0.3, hh - 3, 1, 0, Math.PI * 2); ctx.fill();
 };
 
 // ========== BOSS (横版：从右侧进入) ==========
@@ -2318,28 +3543,42 @@ Boss.prototype.render = function(ctx) {
   if (!this.active) { return; }
   var cx = this.x, cy = this.y;
   var t = this.time;
+  var hpRatio = this.hp / this.maxHp;
 
-  // 环绕粒子
+  // 环绕粒子（升级版：更华丽）
   for (var i = 0; i < this.orbiters.length; i++) {
     var o = this.orbiters[i];
     if (!o.active) { continue; }
     var ox = cx + Math.cos(o.angle) * o.dist;
     var oy = cy + Math.sin(o.angle) * o.dist;
-    // 轨道器光晕
-    var oGlow = ctx.createRadialGradient(ox, oy, 0, ox, oy, o.size);
-    oGlow.addColorStop(0, 'rgba(255,100,50,0.4)');
+    // 轨道器光晕（更大）
+    var oGlow = ctx.createRadialGradient(ox, oy, 0, ox, oy, o.size * 1.5);
+    oGlow.addColorStop(0, 'rgba(255,100,50,0.5)');
+    oGlow.addColorStop(0.5, 'rgba(255,60,30,0.2)');
     oGlow.addColorStop(1, 'transparent');
     ctx.fillStyle = oGlow;
-    ctx.beginPath(); ctx.arc(ox, oy, o.size, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(ox, oy, o.size * 1.5, 0, Math.PI * 2); ctx.fill();
     // 轨道器主体
     var oGrad = ctx.createRadialGradient(ox - 2, oy - 2, 1, ox, oy, o.size / 2);
-    oGrad.addColorStop(0, '#ffcc88');
-    oGrad.addColorStop(0.5, '#ff6644');
-    oGrad.addColorStop(1, '#881100');
+    oGrad.addColorStop(0, '#ffdd99');
+    oGrad.addColorStop(0.4, '#ff8844');
+    oGrad.addColorStop(0.8, '#cc3311');
+    oGrad.addColorStop(1, '#661100');
     ctx.fillStyle = oGrad;
-    ctx.shadowColor = '#ff6644'; ctx.shadowBlur = 8;
+    ctx.shadowColor = '#ff6644'; ctx.shadowBlur = 10;
     ctx.beginPath(); ctx.arc(ox, oy, o.size / 2, 0, Math.PI * 2); ctx.fill();
     ctx.shadowBlur = 0;
+    // 轨道器自身光圈
+    ctx.strokeStyle = 'rgba(255,150,80,0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(ox, oy, o.size * 0.7, 0, Math.PI * 2); ctx.stroke();
+    // 轨道器拖尾
+    var tailA = o.angle - 0.3;
+    var tx1 = cx + Math.cos(tailA) * o.dist;
+    var ty1 = cy + Math.sin(tailA) * o.dist;
+    ctx.strokeStyle = 'rgba(255,100,50,0.15)';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(tx1, ty1); ctx.stroke();
     // 轨道器血条
     if (o.hp < o.maxHp) {
       ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(ox - 8, oy - o.size - 4, 16, 2);
@@ -2347,35 +3586,78 @@ Boss.prototype.render = function(ctx) {
     }
   }
 
-  // === 能量护盾 ===
-  var shieldAlpha = 0.08 + 0.04 * Math.sin(t * 1.5);
-  var shieldR = this.width * 1.1;
+  // 细碎环绕粒子（碎石环绕）
+  for (var di = 0; di < 8; di++) {
+    var da = t * 0.8 + di * Math.PI * 2 / 8;
+    var dr = 42 + Math.sin(t * 1.5 + di * 1.3) * 12;
+    var dx2 = cx + Math.cos(da) * dr;
+    var dy2 = cy + Math.sin(da) * dr * 0.8;
+    var dsz = 1.5 + Math.sin(di * 2.7) * 0.5;
+    ctx.fillStyle = 'rgba(200,80,40,0.3)';
+    ctx.beginPath(); ctx.arc(dx2, dy2, dsz, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // === 能量护盾（多层，六角网格） ===
+  var shieldAlpha = 0.1 + 0.05 * Math.sin(t * 1.5);
+  var shieldR = this.width * 1.15;
+  // 外层护盾
   ctx.strokeStyle = 'rgba(255,50,50,' + shieldAlpha + ')';
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 2.5;
   ctx.shadowColor = '#ff2244';
-  ctx.shadowBlur = 15;
+  ctx.shadowBlur = 18;
   ctx.beginPath();
-  ctx.ellipse(cx, cy, shieldR, shieldR * 0.7, 0, 0, Math.PI * 2);
+  ctx.ellipse(cx, cy, shieldR, shieldR * 0.72, 0, 0, Math.PI * 2);
   ctx.stroke();
   ctx.shadowBlur = 0;
+  // 内层护盾
+  ctx.strokeStyle = 'rgba(255,80,80,' + (shieldAlpha * 0.6) + ')';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, shieldR * 0.88, shieldR * 0.88 * 0.72, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  // 护盾六角网格纹理
+  var hSRx = shieldR * 0.92, hSRy = shieldR * 0.92 * 0.72;
+  ctx.strokeStyle = 'rgba(255,60,60,' + (shieldAlpha * 0.4) + ')';
+  ctx.lineWidth = 0.6;
+  ctx.beginPath();
+  for (var hi = 0; hi < 6; hi++) {
+    var ha = Math.PI / 3 * hi - Math.PI / 2;
+    ctx[hi === 0 ? 'moveTo' : 'lineTo'](cx + Math.cos(ha) * hSRx, cy + Math.sin(ha) * hSRy);
+  }
+  ctx.closePath(); ctx.stroke();
+  // 六角内部连线
+  for (var hi2 = 0; hi2 < 6; hi2++) {
+    var ha2 = Math.PI / 3 * hi2 - Math.PI / 2;
+    var hx1 = cx + Math.cos(ha2) * hSRx, hy1 = cy + Math.sin(ha2) * hSRy;
+    var ha3 = Math.PI / 3 * ((hi2 + 1) % 6) - Math.PI / 2;
+    var hx2 = cx + Math.cos(ha3) * hSRx, hy2 = cy + Math.sin(ha3) * hSRy;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy); ctx.lineTo((hx1 + hx2) / 2, (hy1 + hy2) / 2);
+    ctx.stroke();
+  }
 
   // === 多层装甲主体 ===
   var w = this.width, h = this.height;
   var hw = w / 2, hh = h / 2;
 
-  // 最外层 - 暗色金属基座
-  ctx.fillStyle = '#0a0505';
+  // 最外层 - 暗色金属基座（增强3D感）
+  var baseGrad = ctx.createRadialGradient(cx - hw * 0.15, cy - hh * 0.15, hw * 0.2, cx, cy, hw);
+  baseGrad.addColorStop(0, '#1a0808');
+  baseGrad.addColorStop(0.5, '#0a0404');
+  baseGrad.addColorStop(1, '#050202');
+  ctx.fillStyle = baseGrad;
   ctx.shadowColor = '#ff2244';
-  ctx.shadowBlur = 15;
+  ctx.shadowBlur = 18;
   ctx.beginPath();
   ctx.ellipse(cx, cy, hw, hh, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.shadowBlur = 0;
 
-  // 第二层 - 装甲板
-  var armorGrad = ctx.createRadialGradient(cx - hw * 0.2, cy - hh * 0.2, hw * 0.1, cx, cy, hw * 0.8);
-  armorGrad.addColorStop(0, '#4a1515');
-  armorGrad.addColorStop(0.4, '#2a0a0a');
+  // 第二层 - 装甲板（更强光照渐变）
+  var armorGrad = ctx.createRadialGradient(cx - hw * 0.25, cy - hh * 0.25, hw * 0.1, cx, cy, hw * 0.8);
+  armorGrad.addColorStop(0, '#5a1a1a');
+  armorGrad.addColorStop(0.3, '#3a0e0e');
+  armorGrad.addColorStop(0.5, '#2a0a0a');
   armorGrad.addColorStop(0.7, '#3a1010');
   armorGrad.addColorStop(1, '#1a0505');
   ctx.fillStyle = armorGrad;
@@ -2385,7 +3667,7 @@ Boss.prototype.render = function(ctx) {
 
   // 第三层 - 核心区
   var coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, hw * 0.5);
-  coreGrad.addColorStop(0, '#ff2244');
+  coreGrad.addColorStop(0, '#ff3355');
   coreGrad.addColorStop(0.3, '#cc1133');
   coreGrad.addColorStop(0.6, '#881122');
   coreGrad.addColorStop(1, '#330a0a');
@@ -2397,74 +3679,219 @@ Boss.prototype.render = function(ctx) {
   ctx.fill();
   ctx.shadowBlur = 0;
 
-  // === 装甲板分割线 ===
-  ctx.strokeStyle = 'rgba(255,100,80,0.3)';
-  ctx.lineWidth = 1;
-  for (var j = 0; j < 6; j++) {
-    var la = Math.PI / 3 * j + t * 0.3;
+  // === 装甲板分割线（更粗更亮） ===
+  var splitA = 0.4 + (hpRatio < 0.4 ? Math.sin(t * 8) * 0.2 : 0);
+  ctx.strokeStyle = 'rgba(255,100,80,' + splitA + ')';
+  ctx.lineWidth = 1.5;
+  for (var j = 0; j < 8; j++) {
+    var la = Math.PI / 4 * j + t * 0.3;
     ctx.beginPath();
     ctx.moveTo(cx, cy);
-    ctx.lineTo(cx + Math.cos(la) * hw * 0.8, cy + Math.sin(la) * hh * 0.8);
+    ctx.lineTo(cx + Math.cos(la) * hw * 0.82, cy + Math.sin(la) * hh * 0.82);
     ctx.stroke();
   }
 
-  // === 中央能量核心 ===
-  // 核心脉动
-  var pulse = 1 + Math.sin(t * 3) * 0.15;
-  var icGlow = ctx.createRadialGradient(cx, cy, 0, cx, cy, 12 * pulse);
+  // 装甲损伤纹理（低血量时裂纹/火花）
+  if (hpRatio < 0.5) {
+    var dmgIntensity = 1 - hpRatio * 2;
+    for (var ci2 = 0; ci2 < 4; ci2++) {
+      var cAngle = ci2 * 1.7 + t * 0.5;
+      var cR = hw * 0.4 + ci2 * 5;
+      var cxp = cx + Math.cos(cAngle) * cR * 0.5;
+      var cyp = cy + Math.sin(cAngle) * cR * 0.4;
+      // 裂纹线
+      ctx.strokeStyle = 'rgba(255,180,50,' + (dmgIntensity * 0.4) + ')';
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.moveTo(cxp, cyp);
+      ctx.lineTo(cxp + Math.cos(cAngle + 0.5) * 8, cyp + Math.sin(cAngle + 0.5) * 6);
+      ctx.lineTo(cxp + Math.cos(cAngle - 0.3) * 12, cyp + Math.sin(cAngle - 0.3) * 8);
+      ctx.stroke();
+      // 火花
+      if (Math.sin(t * 10 + ci2 * 2) > 0.6) {
+        ctx.fillStyle = 'rgba(255,200,50,' + (dmgIntensity * 0.7) + ')';
+        ctx.beginPath(); ctx.arc(cxp, cyp, 2, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+  }
+
+  // 核心区旋涡效果
+  for (var vi = 0; vi < 3; vi++) {
+    var vAngle = t * 2 + vi * Math.PI * 2 / 3;
+    var vR = 5 + vi * 5;
+    var vpx = cx + Math.cos(vAngle) * vR;
+    var vpy = cy + Math.sin(vAngle) * vR;
+    ctx.fillStyle = 'rgba(255,100,80,' + (0.15 - vi * 0.04) + ')';
+    ctx.beginPath(); ctx.arc(vpx, vpy, 3, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // === 中央能量核心（升级版：旋涡/黑洞效果） ===
+  var pulse = 1 + Math.sin(t * 3) * 0.2;
+  var coreExpose = this.phase >= 3 ? 1.5 : 1;
+  var icGlow = ctx.createRadialGradient(cx, cy, 0, cx, cy, 15 * pulse * coreExpose);
   icGlow.addColorStop(0, '#ffffff');
-  icGlow.addColorStop(0.2, '#ff6688');
-  icGlow.addColorStop(0.5, '#ff2244');
+  icGlow.addColorStop(0.15, '#ffaacc');
+  icGlow.addColorStop(0.3, '#ff4466');
+  icGlow.addColorStop(0.6, '#cc1133');
   icGlow.addColorStop(1, 'transparent');
   ctx.fillStyle = icGlow;
   ctx.shadowColor = '#ff2244';
-  ctx.shadowBlur = 20 * pulse;
+  ctx.shadowBlur = 25 * pulse * coreExpose;
   ctx.beginPath();
-  ctx.arc(cx, cy, 12 * pulse, 0, Math.PI * 2);
+  ctx.arc(cx, cy, 15 * pulse * coreExpose, 0, Math.PI * 2);
   ctx.fill();
   ctx.shadowBlur = 0;
+
+  // 旋涡效果
+  ctx.strokeStyle = 'rgba(255,200,200,0.3)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (var sp2 = 0; sp2 < Math.PI * 4; sp2 += 0.2) {
+    var spr = sp2 * 2 + 2;
+    var spa = sp2 + t * 3;
+    var spx = cx + Math.cos(spa) * spr;
+    var spy = cy + Math.sin(spa) * spr;
+    if (spr > 14) { break; }
+    ctx[sp2 === 0 ? 'moveTo' : 'lineTo'](spx, spy);
+  }
+  ctx.stroke();
 
   // 核心亮点
   ctx.fillStyle = '#ffffff';
   ctx.shadowColor = '#ff8888';
-  ctx.shadowBlur = 8;
+  ctx.shadowBlur = 10;
   ctx.beginPath();
-  ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+  ctx.arc(cx, cy, 3.5, 0, Math.PI * 2);
   ctx.fill();
   ctx.shadowBlur = 0;
 
-  // === 发光线路 ===
-  ctx.strokeStyle = 'rgba(255,80,80,' + (0.4 + Math.sin(t * 4) * 0.2) + ')';
-  ctx.lineWidth = 1.5;
+  // 能量触手（从核心延伸到装甲板的光线）
+  for (var ti2 = 0; ti2 < 4; ti2++) {
+    var tAngle = Math.PI / 2 * ti2 + t * 0.5;
+    var tInner = 15;
+    var tOuter = hw * 0.7;
+    var tAlpha = 0.2 + Math.sin(t * 3 + ti2) * 0.1;
+    ctx.strokeStyle = 'rgba(255,80,80,' + tAlpha + ')';
+    ctx.lineWidth = 1.2;
+    ctx.shadowColor = '#ff4444';
+    ctx.shadowBlur = 4;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(tAngle) * tInner, cy + Math.sin(tAngle) * tInner);
+    // 弯曲的触手
+    var tMidR = (tInner + tOuter) / 2;
+    var tMidA = tAngle + Math.sin(t * 2 + ti2) * 0.3;
+    ctx.quadraticCurveTo(
+      cx + Math.cos(tMidA) * tMidR, cy + Math.sin(tMidA) * tMidR,
+      cx + Math.cos(tAngle) * tOuter, cy + Math.sin(tAngle) * tOuter
+    );
+    ctx.stroke();
+  }
+  ctx.shadowBlur = 0;
+
+  // === 发光线路（更多更亮，脉动随阶段变化） ===
+  var linePulseFreq = this.phase >= 3 ? 8 : this.phase >= 2 ? 6 : 4;
+  var lineA3 = 0.5 + Math.sin(t * linePulseFreq) * 0.25;
+  // 低血量时线路闪烁
+  if (hpRatio < 0.4) { lineA3 *= (0.5 + Math.sin(t * 12) * 0.5); }
+  ctx.strokeStyle = 'rgba(255,80,80,' + lineA3 + ')';
+  ctx.lineWidth = 1.8;
   ctx.shadowColor = '#ff4444';
-  ctx.shadowBlur = 6;
-  // 水平线
+  ctx.shadowBlur = 8;
+  // 十字线
   ctx.beginPath();
-  ctx.moveTo(cx - hw * 0.4, cy);
-  ctx.lineTo(cx + hw * 0.4, cy);
+  ctx.moveTo(cx - hw * 0.4, cy); ctx.lineTo(cx + hw * 0.4, cy);
+  ctx.moveTo(cx, cy - hh * 0.4); ctx.lineTo(cx, cy + hh * 0.4);
   ctx.stroke();
-  // 垂直线
+  // 对角线
+  ctx.strokeStyle = 'rgba(255,100,80,' + (lineA3 * 0.6) + ')';
+  ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(cx, cy - hh * 0.4);
-  ctx.lineTo(cx, cy + hh * 0.4);
+  ctx.moveTo(cx - hw * 0.3, cy - hh * 0.3); ctx.lineTo(cx + hw * 0.3, cy + hh * 0.3);
+  ctx.moveTo(cx + hw * 0.3, cy - hh * 0.3); ctx.lineTo(cx - hw * 0.3, cy + hh * 0.3);
+  ctx.stroke();
+  // 环形能量线
+  ctx.strokeStyle = 'rgba(255,60,60,' + (lineA3 * 0.4) + ')';
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, hw * 0.35, hh * 0.35, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, hw * 0.6, hh * 0.6, 0, 0, Math.PI * 2);
   ctx.stroke();
   ctx.shadowBlur = 0;
 
   // === 装甲边缘高光 ===
-  ctx.strokeStyle = 'rgba(255,150,130,0.2)';
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(255,150,130,0.25)';
+  ctx.lineWidth = 2.5;
+  ctx.shadowColor = '#ff6644';
+  ctx.shadowBlur = 6;
   ctx.beginPath();
   ctx.ellipse(cx, cy, hw * 0.85, hh * 0.85, 0, 0, Math.PI * 2);
   ctx.stroke();
+  ctx.shadowBlur = 0;
 
-  // === 环绕粒子轨道 ===
-  ctx.strokeStyle = 'rgba(255,100,50,0.12)';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([4, 8]);
+  // === 环绕粒子轨道（更明显） ===
+  ctx.strokeStyle = 'rgba(255,100,50,0.18)';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 6]);
   ctx.beginPath();
-  ctx.ellipse(cx, cy, hw * 0.9, hh * 0.9, 0, 0, Math.PI * 2);
+  ctx.ellipse(cx, cy, hw * 0.95, hh * 0.95, 0, 0, Math.PI * 2);
   ctx.stroke();
   ctx.setLineDash([]);
+
+  // === Boss后方大型推进器火焰 ===
+  var thrustLen = 20 + Math.sin(t * 4) * 8;
+  // 上推进器
+  for (var thi = -1; thi <= 1; thi += 2) {
+    var thy = cy + thi * hh * 0.5;
+    var thGrad = ctx.createLinearGradient(cx + hw, thy, cx + hw + thrustLen, thy);
+    thGrad.addColorStop(0, '#ff6644');
+    thGrad.addColorStop(0.3, '#cc3322');
+    thGrad.addColorStop(0.6, '#881111');
+    thGrad.addColorStop(1, 'transparent');
+    ctx.fillStyle = thGrad;
+    ctx.beginPath();
+    ctx.moveTo(cx + hw, thy - 6);
+    ctx.lineTo(cx + hw + thrustLen, thy + Math.sin(t * 6 + thi) * 3);
+    ctx.lineTo(cx + hw + thrustLen * 0.7, thy);
+    ctx.lineTo(cx + hw + thrustLen, thy - Math.sin(t * 6 + thi) * 3);
+    ctx.lineTo(cx + hw, thy + 6);
+    ctx.closePath();
+    ctx.fill();
+    // 推进器内核
+    var thInner = ctx.createLinearGradient(cx + hw, thy, cx + hw + thrustLen * 0.5, thy);
+    thInner.addColorStop(0, '#ffcc88');
+    thInner.addColorStop(0.3, '#ff8844');
+    thInner.addColorStop(1, 'transparent');
+    ctx.fillStyle = thInner;
+    ctx.beginPath();
+    ctx.moveTo(cx + hw, thy - 3);
+    ctx.lineTo(cx + hw + thrustLen * 0.5, thy + Math.sin(t * 8 + thi) * 1.5);
+    ctx.lineTo(cx + hw, thy + 3);
+    ctx.closePath();
+    ctx.fill();
+  }
+  // 中央推进器（更大）
+  var cThrustLen = 30 + Math.sin(t * 3) * 10;
+  var cThGrad = ctx.createLinearGradient(cx + hw, cy, cx + hw + cThrustLen, cy);
+  cThGrad.addColorStop(0, '#ff8855');
+  cThGrad.addColorStop(0.2, '#ff4422');
+  cThGrad.addColorStop(0.5, '#aa2211');
+  cThGrad.addColorStop(1, 'transparent');
+  ctx.fillStyle = cThGrad;
+  ctx.beginPath();
+  ctx.moveTo(cx + hw, cy - 10);
+  ctx.lineTo(cx + hw + cThrustLen, cy + Math.sin(t * 5) * 4);
+  ctx.lineTo(cx + hw + cThrustLen * 0.6, cy);
+  ctx.lineTo(cx + hw + cThrustLen, cy - Math.sin(t * 5) * 4);
+  ctx.lineTo(cx + hw, cy + 10);
+  ctx.closePath();
+  ctx.fill();
+  // 中央推进器光晕
+  ctx.fillStyle = 'rgba(255,100,50,0.08)';
+  ctx.beginPath();
+  ctx.ellipse(cx + hw + cThrustLen * 0.4, cy, cThrustLen * 0.6, 14, 0, 0, Math.PI * 2);
+  ctx.fill();
 };
 
 Boss.prototype.getOrbiterBounds = function(index) {
