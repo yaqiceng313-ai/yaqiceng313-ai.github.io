@@ -171,6 +171,11 @@
     .project .tags { margin-top: auto; display: flex; flex-wrap: wrap; gap: 7px; }
     .tag { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); font-size: .76rem; }
 
+    .hobby-card { display: flex; flex-direction: column; align-items: center; text-align: center; }
+    .hobby-media { width: 100%; border-radius: 14px; overflow: hidden; margin-bottom: 14px; border: 1px solid var(--line); }
+    .hobby-media video, .hobby-media img { width: 100%; display: block; border-radius: 14px; }
+    .hobby-caption { font-weight: 700; font-size: .95rem; margin-top: 4px; }
+    .hobby-desc { color: var(--muted); font-size: .86rem; margin-top: 6px; }
     .skill-group h3 { margin: 0 0 15px; font-size: 1rem; }
     .skill-row { margin: 13px 0; }
     .skill-meta { display: flex; justify-content: space-between; font-size: .86rem; margin-bottom: 6px; }
@@ -352,6 +357,10 @@
       ],
       education: [],
       certificates: [],
+      hobbies: [
+        { type: "video", src: "redpandacompress_IMG_3787.mp4", caption: "完全零基础自学舞蹈" },
+        { type: "image", src: "IMG_3804 2.jpg", caption: "自学烹饪" }
+      ],
       strengths: [
         ["沟通表达能力强", "善于倾听与理解需求，能够快速建立信任关系，高效推进沟通协作。"],
         ["服务意识优秀", "坚持以用户需求为核心，注重细节与体验，能够持续提升服务质量。"],
@@ -474,6 +483,20 @@
         </section>`);
     }
 
+    function renderHobbies() {
+      if (!resume.hobbies?.length) return;
+      $("#top").insertAdjacentHTML("beforeend", `
+        <section id="hobbies">
+          <div class="container">
+            <div class="section-head"><div><span class="eyebrow">Hobbies</span><h2 class="section-title">兴趣爱好</h2></div><span class="muted">工作之外，生活亦是修行</span></div>
+            <div class="grid-3">${resume.hobbies.map(h => `<article class="card hobby-card">
+              <div class="hobby-media">${h.type === "video" ? `<video src="${safe(h.src)}" controls playsinline preload="metadata"></video>` : `<img src="${safe(h.src)}" alt="${safe(h.caption)}" loading="lazy">`}</div>
+              <div class="hobby-caption">${safe(h.caption)}</div>
+            </article>`).join("")}</div>
+          </div>
+        </section>`);
+    }
+
     function renderEducation() {
       if (!resume.education?.length && !resume.certificates?.length) return;
       $("#top").insertAdjacentHTML("beforeend", `
@@ -524,6 +547,7 @@
     renderExperience();
     renderProjects();
     renderSkills();
+    renderHobbies();
     renderEducation();
     renderStrengths();
 
