@@ -77,8 +77,8 @@ canvas{display:block;position:absolute;top:0;left:0;width:100%;height:100%}
 #ac .abtn:hover{background:#00f0ff22;border-color:#00f0ff;color:#00f0ff}
 #ac .abtn.muted{color:#ff446688;border-color:#ff446644}
 #audio-start{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:35;pointer-events:auto}
-#audio-start .asbtn{padding:calc(var(--scale)*10px) calc(var(--scale)*20px);font-size:calc(var(--scale)*13px);font-family:inherit;color:#00f0ff;background:#00f0ff11;border:1px solid #00f0ff66;cursor:pointer;letter-spacing:calc(var(--scale)*2px);border-radius:3px;transition:all .3s}
-#audio-start .asbtn:hover{background:#00f0ff22;box-shadow:0 0 calc(var(--scale)*20px) #00f0ff33}
+#audio-start .asbtn{padding:calc(var(--scale)*10px) calc(var(--scale)*20px);font-size:calc(var(--scale)*13px);font-family:inherit;color:#4488ff;background:#0a1a2a;border:1px solid rgba(0,240,255,0.4);cursor:pointer;letter-spacing:calc(var(--scale)*2px);border-radius:3px;transition:all .3s}
+#audio-start .asbtn:hover{background:#0f2a40;box-shadow:0 0 calc(var(--scale)*20px) rgba(0,240,255,0.2)}
 #audio-start .asbtn .asicon{font-size:calc(var(--scale)*20px)}
 </style>
 </head>
@@ -749,30 +749,75 @@ AudioManager.prototype.stopAll = function() {
 };
 
 // ========== CAMERA ==========
+// 震动类型参数配置：[频率, 衰减指数, 余震概率, 余震强度比, 余震延迟ms]
+var SHAKE_TYPES = {
+  light:  { freq: 45, decay: 2.2, aftershock: 0,   aftRatio: 0,   aftDelay: 0   },
+  medium: { freq: 30, decay: 1.5, aftershock: 0.2, aftRatio: 0.4, aftDelay: 200 },
+  heavy:  { freq: 18, decay: 1.0, aftershock: 0.5, aftRatio: 0.5, aftDelay: 300 },
+  bomb:   { freq: 12, decay: 0.7, aftershock: 0.8, aftRatio: 0.6, aftDelay: 150 }
+};
+
 function Camera() {
-  this.shakeIntensity = 0; this.shakeDuration = 0; this.shakeTimer = 0;
-  this.ox = 0; this.oy = 0;
+  this.shakeLayers = [];  // 多震动叠加层
+  this.ox = 0; this.oy = 0; this.or = 0;  // r = 微旋转偏移
   this.targetX = 0; this.targetY = 0;
 }
-Camera.prototype.shake = function(intensity, duration) {
-  this.shakeIntensity = Math.max(this.shakeIntensity, intensity);
-  this.shakeDuration = Math.max(this.shakeDuration, duration);
-  this.shakeTimer = 0;
+Camera.prototype.shake = function(intensity, duration, type) {
+  if (!type) { type = 'medium'; }
+  this.shakeLayers.push({
+    intensity: intensity,
+    duration: duration,
+    timer: 0,
+    type: type,
+    freqX: SHAKE_TYPES[type].freq + U.r(-3, 3),
+    freqY: SHAKE_TYPES[type].freq + U.r(-3, 3) - 3,
+    aftershockFired: false
+  });
 };
 Camera.prototype.update = function(dt) {
-  if (this.shakeTimer < this.shakeDuration) {
-    this.shakeTimer += dt * 1000;
-    var progress = this.shakeTimer / this.shakeDuration;
-    var decay = 1 - progress;
-    // 使用平滑阻尼振动
-    this.ox = Math.sin(progress * 30) * this.shakeIntensity * decay * 0.8;
-    this.oy = Math.cos(progress * 27) * this.shakeIntensity * decay * 0.6;
+  var totalOx = 0, totalOy = 0, totalOr = 0;
+  var i = this.shakeLayers.length;
+  while (i--) {
+    var s = this.shakeLayers[i];
+    var cfg = SHAKE_TYPES[s.type];
+    s.timer += dt * 1000;
+    var progress = s.timer / s.duration;
+    if (progress < 1) {
+      var decay = Math.pow(1 - progress, cfg.decay);
+      totalOx += Math.sin(progress * s.freqX) * s.intensity * decay * 0.8;
+      totalOy += Math.cos(progress * s.freqY) * s.intensity * decay * 0.6;
+      // 微旋转偏移（极微小，增加临场感）
+      totalOr += Math.sin(progress * s.freqX * 0.7) * s.intensity * decay * 0.002;
+      // bomb类型：多重波叠加
+      if (s.type === 'bomb') {
+        totalOx += Math.sin(progress * s.freqX * 2.3 + 1.5) * s.intensity * decay * 0.4;
+        totalOy += Math.cos(progress * s.freqY * 1.7 + 0.8) * s.intensity * decay * 0.3;
+      }
+    } else {
+      // 余震机制
+      if (!s.aftershockFired && Math.random() < cfg.aftershock) {
+        s.aftershockFired = true;
+        var ai = s.intensity * cfg.aftRatio;
+        var ad = s.duration * 0.4;
+        this.shakeLayers.push({
+          intensity: ai, duration: ad, timer: 0, type: s.type,
+          freqX: cfg.freq + U.r(-3, 3), freqY: cfg.freq + U.r(-3, 3) - 3,
+          aftershockFired: true  // 余震不再产生余震
+        });
+      }
+      this.shakeLayers.splice(i, 1);
+    }
+  }
+  if (this.shakeLayers.length > 0) {
+    this.ox = totalOx;
+    this.oy = totalOy;
+    this.or = totalOr;
   } else {
-    // 平滑回归
     this.ox = U.lerp(this.ox, 0, dt * 8);
     this.oy = U.lerp(this.oy, 0, dt * 8);
+    this.or = U.lerp(this.or, 0, dt * 8);
     if (Math.abs(this.ox) < 0.1 && Math.abs(this.oy) < 0.1) {
-      this.ox = 0; this.oy = 0; this.shakeIntensity = 0; this.shakeDuration = 0;
+      this.ox = 0; this.oy = 0; this.or = 0;
     }
   }
 };
@@ -2151,12 +2196,22 @@ Bullet.prototype.reset = function() {
   this.active = false; this.damage = 1; this.isEnemy = false;
   this.color = '#fff'; this.trail = [];
   this.homing = false; this.homingTarget = null; this.homingStrength = 0;
+  this.bulletType = 'default'; this.age = 0;
 };
 Bullet.prototype.init = function(x, y, vx, vy, damage, color, isEnemy) {
   this.x = x; this.y = y; this.vx = vx; this.vy = vy;
   this.active = true; this.damage = damage; this.color = color; this.isEnemy = !!isEnemy;
   this.width = isEnemy ? 6 : 10; this.height = isEnemy ? 4 : 3;
   this.homing = false; this.homingTarget = null; this.trail = [];
+  this.age = 0;
+  // 自动判断子弹类型
+  if (isEnemy) {
+    if (color === '#ff2244' || color === '#ff6644') { this.bulletType = 'enemy_elite'; }
+    else { this.bulletType = 'enemy_default'; }
+  } else {
+    if (color === '#ff8800' || this.homing) { this.bulletType = 'missile'; }
+    else { this.bulletType = 'default'; }
+  }
 };
 Bullet.prototype.update = function(dt) {
   if (this.homing && this.homingTarget && this.homingTarget.active) {
@@ -2169,7 +2224,8 @@ Bullet.prototype.update = function(dt) {
     var speed = Math.hypot(this.vx, this.vy);
     this.vx = Math.cos(newAngle) * speed; this.vy = Math.sin(newAngle) * speed;
   }
-  this.trail.push({ x: this.x, y: this.y, life: 0.08 });
+  this.age += dt;
+  this.trail.push({ x: this.x, y: this.y, life: 0.12 });
   this.x += this.vx * dt; this.y += this.vy * dt;
   for (var i = this.trail.length - 1; i >= 0; i--) {
     this.trail[i].life -= dt;
@@ -2179,10 +2235,258 @@ Bullet.prototype.update = function(dt) {
   if (this.x < pa.x - 20 || this.x > pa.x + pa.w + 20 || this.y < pa.y - 20 || this.y > pa.y + pa.h + 20) { this.active = false; }
 };
 Bullet.prototype.render = function(ctx) {
-  // 拖尾
+  var bt = this.bulletType;
+  var dir = this.isEnemy ? -1 : 1; // 飞行方向：玩家向右1，敌机向左-1
+
+  // ===== 玩家默认能量弹 =====
+  if (bt === 'default') {
+    // 锥形渐变拖尾
+    var tLen = this.trail.length;
+    for (var i = 0; i < tLen; i++) {
+      var t = this.trail[i];
+      var ratio = i / tLen;
+      var alpha = (t.life / 0.12) * 0.7 * ratio;
+      var tw = 3 + ratio * 3;
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = this.color;
+      ctx.shadowColor = this.color;
+      ctx.shadowBlur = 4;
+      ctx.beginPath();
+      ctx.moveTo(t.x + tw * dir, t.y);
+      ctx.lineTo(t.x - tw * 0.3 * dir, t.y - tw * 0.4);
+      ctx.lineTo(t.x - tw * 0.3 * dir, t.y + tw * 0.4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+    // 拖尾闪烁小亮点
+    if (this.trail.length > 2 && Math.random() < 0.3) {
+      var si = Math.floor(Math.random() * this.trail.length);
+      var st = this.trail[si];
+      ctx.globalAlpha = 0.8;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(st.x, st.y, 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = this.opacity;
+    // 外层大光晕
+    var outerR = 10 + Math.sin(this.age * 12) * 1.5;
+    var glowGrad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, outerR);
+    glowGrad.addColorStop(0, this.color + 'cc');
+    glowGrad.addColorStop(0.4, this.color + '44');
+    glowGrad.addColorStop(1, 'transparent');
+    ctx.fillStyle = glowGrad;
+    ctx.beginPath();
+    ctx.ellipse(this.x, this.y, outerR, outerR * 0.7, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // 中层能量环（水平拉长椭圆）
+    ctx.fillStyle = this.color;
+    ctx.shadowColor = this.color;
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.ellipse(this.x + dir * 2, this.y, 6, 3.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    // 内核白热核心
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = '#ffffff';
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.ellipse(this.x + dir * 1.5, this.y, 3, 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+    return;
+  }
+
+  // ===== 玩家导弹 =====
+  if (bt === 'missile') {
+    // 烟雾拖尾
+    for (var i = 0; i < this.trail.length; i++) {
+      var t = this.trail[i];
+      var ratio = i / this.trail.length;
+      var alpha = (t.life / 0.12) * 0.4 * ratio;
+      var sz = 2 + (1 - ratio) * 4;
+      ctx.globalAlpha = alpha * 0.5;
+      ctx.fillStyle = '#666666';
+      ctx.beginPath();
+      ctx.arc(t.x - dir * 3, t.y, sz, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // 火焰尾焰（红橙黄渐变）
+    for (var i = 0; i < this.trail.length; i++) {
+      var t = this.trail[i];
+      var ratio = i / this.trail.length;
+      var alpha = (t.life / 0.12) * 0.8 * ratio;
+      var flameW = (1 - ratio) * 6 + 2;
+      var flameH = (1 - ratio) * 3 + 1;
+      ctx.globalAlpha = alpha;
+      // 黄色内核火焰
+      ctx.fillStyle = '#ffee44';
+      ctx.shadowColor = '#ff8800';
+      ctx.shadowBlur = 5;
+      ctx.beginPath();
+      ctx.ellipse(t.x - dir * flameW * 0.5, t.y, flameW * 0.5, flameH, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // 橙色外层火焰
+      ctx.fillStyle = '#ff6600';
+      ctx.shadowBlur = 3;
+      ctx.beginPath();
+      ctx.ellipse(t.x - dir * flameW * 0.8, t.y, flameW * 0.7, flameH * 1.3, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // 红色最外层
+      ctx.fillStyle = '#ff2200';
+      ctx.globalAlpha = alpha * 0.5;
+      ctx.beginPath();
+      ctx.ellipse(t.x - dir * flameW, t.y, flameW, flameH * 1.6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+    ctx.globalAlpha = this.opacity;
+    // 导弹弹体：菱形/尖头
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    if (dir < 0) { ctx.scale(-1, 1); }
+    // 金属外壳
+    ctx.fillStyle = '#cc7700';
+    ctx.shadowColor = '#ff8800';
+    ctx.shadowBlur = 4;
+    ctx.beginPath();
+    ctx.moveTo(8, 0);        // 尖头
+    ctx.lineTo(-2, -4);      // 上翼
+    ctx.lineTo(-5, -2);
+    ctx.lineTo(-5, 2);
+    ctx.lineTo(-2, 4);       // 下翼
+    ctx.closePath();
+    ctx.fill();
+    // 高光
+    ctx.fillStyle = '#ffaa44';
+    ctx.beginPath();
+    ctx.moveTo(8, 0);
+    ctx.lineTo(0, -2);
+    ctx.lineTo(0, 2);
+    ctx.closePath();
+    ctx.fill();
+    // 尾翼
+    ctx.fillStyle = '#996600';
+    ctx.fillRect(-6, -5, 2, 2);
+    ctx.fillRect(-6, 3, 2, 2);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+    ctx.globalAlpha = 1;
+    return;
+  }
+
+  // ===== 敌机普通子弹 =====
+  if (bt === 'enemy_default') {
+    // 红色渐消拖尾
+    for (var i = 0; i < this.trail.length; i++) {
+      var t = this.trail[i];
+      var ratio = i / this.trail.length;
+      var alpha = (t.life / 0.12) * 0.6 * ratio;
+      var tw = 1 + ratio * 3;
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = '#ff4444';
+      ctx.shadowColor = '#ff2222';
+      ctx.shadowBlur = 3;
+      ctx.beginPath();
+      ctx.ellipse(t.x, t.y, tw * 0.8, tw * 0.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+    ctx.globalAlpha = this.opacity;
+    // 外层红色光晕
+    var outerR = 8;
+    var glowGrad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, outerR);
+    glowGrad.addColorStop(0, '#ff444488');
+    glowGrad.addColorStop(0.5, '#ff222244');
+    glowGrad.addColorStop(1, 'transparent');
+    ctx.fillStyle = glowGrad;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, outerR, 0, Math.PI * 2);
+    ctx.fill();
+    // 红色能量球
+    ctx.fillStyle = '#ff4444';
+    ctx.shadowColor = '#ff2222';
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.ellipse(this.x, this.y, 4, 3, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // 内核橙白色
+    ctx.fillStyle = '#ffcc88';
+    ctx.shadowBlur = 4;
+    ctx.beginPath();
+    ctx.ellipse(this.x + dir, this.y, 2, 1.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(this.x + dir * 0.5, this.y, 1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+    return;
+  }
+
+  // ===== 敌机精英子弹 =====
+  if (bt === 'enemy_elite') {
+    // 更强的拖尾
+    for (var i = 0; i < this.trail.length; i++) {
+      var t = this.trail[i];
+      var ratio = i / this.trail.length;
+      var alpha = (t.life / 0.12) * 0.7 * ratio;
+      var tw = 2 + ratio * 4;
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = this.color;
+      ctx.shadowColor = this.color;
+      ctx.shadowBlur = 5;
+      ctx.beginPath();
+      ctx.ellipse(t.x, t.y, tw, tw * 0.6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+    ctx.globalAlpha = this.opacity;
+    // 脉冲效果
+    var pulse = 1 + Math.sin(this.age * 16) * 0.2;
+    // 外层强光晕
+    var outerR = 12 * pulse;
+    var glowGrad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, outerR);
+    glowGrad.addColorStop(0, this.color + 'aa');
+    glowGrad.addColorStop(0.3, this.color + '55');
+    glowGrad.addColorStop(0.7, this.color + '22');
+    glowGrad.addColorStop(1, 'transparent');
+    ctx.fillStyle = glowGrad;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, outerR, 0, Math.PI * 2);
+    ctx.fill();
+    // 能量球（更大）
+    ctx.fillStyle = this.color;
+    ctx.shadowColor = this.color;
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    ctx.ellipse(this.x, this.y, 5 * pulse, 4 * pulse, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    // 内核白热
+    ctx.fillStyle = '#ffddcc';
+    ctx.shadowColor = '#ffffff';
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.ellipse(this.x + dir, this.y, 2.5, 1.8, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(this.x + dir * 0.5, this.y, 1.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+    return;
+  }
+
+  // ===== 兜底：默认渲染 =====
   for (var i = 0; i < this.trail.length; i++) {
     var t = this.trail[i];
-    var alpha = t.life / 0.08 * 0.6;
+    var alpha = t.life / 0.12 * 0.6;
     ctx.globalAlpha = alpha;
     ctx.fillStyle = this.color;
     ctx.shadowColor = this.color;
@@ -2191,7 +2495,6 @@ Bullet.prototype.render = function(ctx) {
     ctx.shadowBlur = 0;
   }
   ctx.globalAlpha = this.opacity;
-  // 子弹光晕
   var glowGrad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.isEnemy ? 6 : 8);
   glowGrad.addColorStop(0, this.color);
   glowGrad.addColorStop(0.5, this.color + '88');
@@ -2200,7 +2503,6 @@ Bullet.prototype.render = function(ctx) {
   ctx.beginPath();
   ctx.arc(this.x, this.y, this.isEnemy ? 6 : 8, 0, Math.PI * 2);
   ctx.fill();
-  // 子弹核心
   ctx.fillStyle = '#ffffff';
   ctx.shadowColor = this.color; ctx.shadowBlur = this.isEnemy ? 4 : 8;
   ctx.fillRect(this.x - this.width / 2, this.y - this.height / 2, this.width, this.height);
@@ -2326,13 +2628,20 @@ Player.prototype.fire = function(bullets, particles) {
     b.homing = p.homing || false; b.homingStrength = p.homingStrength || 0;
     bullets.list.push(b);
   }
-  // 枪口闪光
+  // 增强枪口闪光
   if (particles) {
     particles.emitMuzzleFlash(this.x + 18, this.y, '#00ccff');
+    // 枪口能量环
+    particles.emitEnergyRing(this.x + 18, this.y, 5, '#00ccff');
+    // 白色闪光更亮
+    particles.emit(this.x + 18, this.y, 3, {
+      color: '#ffffff', speed: 60, spread: Math.PI * 0.5, life: 0.06,
+      size: 3, type: 'glow', glowColor: '#ffffff', endSize: 0.5
+    });
   }
 };
 
-Player.prototype.fireSubWeapon = function(bullets, enemies) {
+Player.prototype.fireSubWeapon = function(bullets, enemies, particles) {
   if (this.subWeaponLevel <= 0) { return; }
   if (this.subWeaponTimer > 0) { return; }
   this.subWeaponTimer = 500;
@@ -2352,6 +2661,15 @@ Player.prototype.fireSubWeapon = function(bullets, enemies) {
       if (target) { b.homing = true; b.homingTarget = target; b.homingStrength = 5; }
       b.width = 8; b.height = 5;
       bullets.list.push(b);
+    }
+    // 导弹发射枪口闪光
+    if (particles) {
+      particles.emitMuzzleFlash(this.x + 15, this.y, '#ff8800');
+      particles.emitEnergyRing(this.x + 15, this.y, 4, '#ff6600');
+      particles.emit(this.x + 15, this.y, 2, {
+        color: '#ffffff', speed: 50, spread: Math.PI * 0.4, life: 0.06,
+        size: 2.5, type: 'glow', glowColor: '#ff8800', endSize: 0.5
+      });
     }
   }
 };
@@ -3971,7 +4289,7 @@ PowerUp.prototype.render = function(ctx) {
 // ========== COLLISION ==========
 var Col = {};
 
-Col.checkBulletEnemy = function(bullets, enemies, particles, audio) {
+Col.checkBulletEnemy = function(bullets, enemies, particles, audio, camera) {
   for (var bi = 0; bi < bullets.length; bi++) {
     var b = bullets[bi];
     if (!b.active || b.isEnemy) { continue; }
@@ -3979,20 +4297,30 @@ Col.checkBulletEnemy = function(bullets, enemies, particles, audio) {
       var e = enemies[ei];
       if (!e.active) { continue; }
       if (b.collidesWith(e)) {
+        var maxHp = e.maxHp || e.hp + b.damage;  // 记录原始hp用于判断爆炸类型
         b.active = false; e.hp -= b.damage;
-        // 命中反馈
+        // 命中反馈 - 增强
         particles.emitHitSpark(b.x, b.y, e.color);
+        particles.emitHitSpark(b.x, b.y, e.color);  // 双倍火花
         particles.emitEnergyRing(b.x, b.y, 8, '#ffffff');
-        e.hitFlash = 0.08;
+        particles.emitShockwave(b.x, b.y, 8, e.color);  // 小型命中冲击波
+        particles.emitDebris(b.x, b.y, 3, e.color, 100);  // 金属碎片
+        e.hitFlash = 0.1;
         audio.hit();
+        if (camera) { camera.shake(1.5, 60, 'light'); }  // 命中微震
         if (e.hp <= 0) {
           e.active = false;
-          particles.createExplosion(e.x, e.y, 'small');
-          particles.emitShockwave(e.x, e.y, 20, e.color);
-          audio.explode('small');
-          return { killed: true, enemy: e, x: e.x, y: e.y, score: e.score };
+          // 根据敌机最大血量决定爆炸大小
+          var expType = 'small';
+          if (maxHp > 3) { expType = 'large'; }
+          else if (maxHp > 1) { expType = 'medium'; }
+          particles.createExplosion(e.x, e.y, expType);
+          particles.emitShockwave(e.x, e.y, expType === 'large' ? 35 : (expType === 'medium' ? 28 : 20), e.color);
+          particles.emitDebris(e.x, e.y, expType === 'large' ? 8 : (expType === 'medium' ? 5 : 3), e.color, 180);
+          audio.explode(expType);
+          return { killed: true, enemy: e, x: e.x, y: e.y, score: e.score, expType: expType, hitX: b.x, hitY: b.y };
         }
-        return { killed: false };
+        return { killed: false, hitX: b.x, hitY: b.y };
       }
     }
   }
@@ -4008,7 +4336,9 @@ Col.checkBulletPlayer = function(enemyBullets, player, particles, audio, camera)
       b.active = false;
       if (player.takeDamage(1)) {
         particles.emit(player.x, player.y, 10, { color: '#ff4466', speed: 200, spread: Math.PI * 2, life: 0.3, size: 3 });
-        audio.hit(); camera.shake(CFG.SH.ph.i, CFG.SH.ph.d);
+        particles.emitShockwave(player.x, player.y, 25, '#ff4466');  // 红色冲击波
+        particles.emitDebris(player.x, player.y, 5, '#ff4466', 160);  // 碎片
+        audio.hit(); camera.shake(CFG.SH.ph.i, CFG.SH.ph.d, 'medium');
         return true;
       }
     }
@@ -4016,7 +4346,7 @@ Col.checkBulletPlayer = function(enemyBullets, player, particles, audio, camera)
   return false;
 };
 
-Col.checkBulletBoss = function(bullets, boss, particles) {
+Col.checkBulletBoss = function(bullets, boss, particles, audio, camera) {
   if (!boss.active || !boss.entered) { return null; }
   for (var i = 0; i < bullets.length; i++) {
     var b = bullets[i];
@@ -4024,7 +4354,10 @@ Col.checkBulletBoss = function(bullets, boss, particles) {
     if (b.collidesWith(boss)) {
       b.active = false; boss.hp -= b.damage;
       particles.emitHitSpark(b.x, b.y, '#ff6644');
-      particles.emitEnergyRing(b.x, b.y, 10, '#ff4466');
+      particles.emitHitSpark(b.x, b.y, '#ff6644');  // 双倍火花
+      particles.emitEnergyRing(b.x, b.y, 12, '#ff4466');  // 增大能量环
+      particles.emitDebris(b.x, b.y, 4, '#ff6644', 120);  // 金属碎片
+      if (camera) { camera.shake(1.5, 60, 'light'); }  // 命中微震
       return { hit: true, damage: b.damage };
     }
     for (var oi = 0; oi < boss.orbiters.length; oi++) {
@@ -4050,9 +4383,13 @@ Col.checkEnemyPlayer = function(enemies, player, particles, audio, camera) {
     if (!e.active) { continue; }
     if (e.collidesWith(player)) {
       e.active = false;
-      particles.createExplosion(e.x, e.y, 'small');
-      particles.emitShockwave(e.x, e.y, 20, '#ff4466');
-      if (player.takeDamage(1)) { audio.explode(); camera.shake(CFG.SH.ph.i, CFG.SH.ph.d); }
+      particles.createExplosion(e.x, e.y, 'medium');  // 增强爆炸
+      particles.emitShockwave(e.x, e.y, 30, '#ff4466');  // 增大冲击波
+      particles.emitDebris(e.x, e.y, 6, '#ff8844', 180);  // 碎片
+      if (player.takeDamage(1)) {
+        audio.explode();
+        camera.shake(CFG.SH.ph.i, CFG.SH.ph.d, 'heavy');
+      }
     }
   }
 };
@@ -4191,6 +4528,7 @@ function Game() {
   this.bossIntroTimer = 0;
   this.bombActive = false; this.bombTimer = 0; this.bombFlash = 0;
   this.screenFlash = 0;       // 屏幕闪光
+  this.screenRedFlash = 0;    // 屏幕闪红（玩家受伤）
   this.slowMotion = 0;        // 慢动作系数
   this.slowMotionTarget = 0;  // 慢动作目标值
 
@@ -4310,7 +4648,7 @@ Game.prototype._triggerBomb = function() {
   if (this.state !== 'PLAYING') { return; }
   if (!this.player.useBomb()) { return; }
   this.bombActive = true; this.bombTimer = 0.4; this.bombFlash = 0;
-  this.audio.bomb(); this.camera.shake(CFG.SH.bomb.i, CFG.SH.bomb.d);
+  this.audio.bomb(); this.camera.shake(CFG.SH.bomb.i, CFG.SH.bomb.d, 'bomb');
   this.enemyBullets.list.length = 0;
 
   for (var i = 0; i < this.enemies.length; i++) {
@@ -4431,6 +4769,8 @@ Game.prototype._update = function(dt) {
   this.camera.update(dt);
   // 屏幕闪光衰减
   if (this.screenFlash > 0) { this.screenFlash -= dt * 3; }
+  // 屏幕闪红衰减
+  if (this.screenRedFlash > 0) { this.screenRedFlash -= dt * 4; }
   // 慢动作自动恢复
   if (this.slowMotionTarget > 0) { this.slowMotionTarget = Math.max(0, this.slowMotionTarget - dt * 0.8); }
 
@@ -4481,7 +4821,7 @@ Game.prototype._update = function(dt) {
 
   this.player.update(dt, this.input);
   if (this.player.canFire()) { this.player.fire(this.playerBullets, this.particles); }
-  this.player.fireSubWeapon(this.playerBullets, this.enemies);
+  this.player.fireSubWeapon(this.playerBullets, this.enemies, this.particles);
 
   // 引擎尾焰粒子
   if (this.player.active) {
@@ -4537,7 +4877,7 @@ Game.prototype._update = function(dt) {
     this.spawner.bossSpawned = true; this.boss.init();
     this.state = 'BOSS_INTRO'; this.bossIntroTimer = 2.0;
     this._show('warn'); this.audio.bossWarning();
-    this.camera.shake(3, 1500);
+    this.camera.shake(3, 1500, 'heavy');
   }
 
   for (var n = 0; n < this.powerups.length; n++) {
@@ -4545,26 +4885,44 @@ Game.prototype._update = function(dt) {
   }
 
   var colResult;
-  while ((colResult = Col.checkBulletEnemy(this.playerBullets.list, this.enemies, this.particles, this.audio)) !== null) {
+  while ((colResult = Col.checkBulletEnemy(this.playerBullets.list, this.enemies, this.particles, this.audio, this.camera)) !== null) {
     if (colResult.killed) {
       this.enemiesKilled++;
       this.score += Math.floor(colResult.score * this.combo.multiplier);
       this.combo.addKill();
-      this.camera.shake(3, 120);
-      this.screenFlash = Math.min(1, this.screenFlash + 0.08);
-      this.slowMotionTarget = Math.min(1, this.slowMotionTarget + 0.15);
+      // 根据爆炸类型分级震动、闪光、慢动作
+      var expType = colResult.expType || 'small';
+      var comboMult = this.combo.multiplier || 1;
+      if (expType === 'large') {
+        this.camera.shake(8, 250, 'heavy');
+        this.screenFlash = Math.min(1, this.screenFlash + 0.2);
+        this.slowMotionTarget = Math.min(1, this.slowMotionTarget + 0.25);
+      } else if (expType === 'medium') {
+        this.camera.shake(5, 180, 'medium');
+        this.screenFlash = Math.min(1, this.screenFlash + 0.12);
+        this.slowMotionTarget = Math.min(1, this.slowMotionTarget + 0.15);
+      } else {
+        this.camera.shake(3, 120, 'medium');
+        this.screenFlash = Math.min(1, this.screenFlash + 0.06);
+        this.slowMotionTarget = Math.min(1, this.slowMotionTarget + 0.08);
+      }
+      // 连击增强：高连击时额外增加震动和闪光
+      if (comboMult > 2.0) {
+        this.camera.shake(comboMult * 0.5, 80, 'light');
+        this.screenFlash = Math.min(1, this.screenFlash + 0.03);
+      }
       if (Math.random() < colResult.enemy.dropChance) { PUM.spawn(colResult.x, colResult.y, this.powerups, this.powerupPool); }
     }
   }
 
-  var bossHit = Col.checkBulletBoss(this.playerBullets.list, this.boss, this.particles);
+  var bossHit = Col.checkBulletBoss(this.playerBullets.list, this.boss, this.particles, this.audio, this.camera);
   if (bossHit && bossHit.hit) {
     if (this.boss.hp <= 0) {
       this.boss.active = false; this.bossesDefeated++;
       this.score += 50000;
       this.particles.createExplosion(this.boss.x, this.boss.y, 'boss');
       this.particles.emitShockwave(this.boss.x, this.boss.y, 40, '#ff4466');
-      this.audio.explode('boss'); this.camera.shake(CFG.SH.be.i, CFG.SH.be.d);
+      this.audio.explode('boss'); this.camera.shake(CFG.SH.be.i, CFG.SH.be.d, 'bomb');
       this.screenFlash = Math.min(1, this.screenFlash + 0.3);
       this.slowMotionTarget = 1;
       PUM.spawn(this.boss.x, this.boss.y, this.powerups, this.powerupPool);
@@ -4576,7 +4934,8 @@ Game.prototype._update = function(dt) {
     }
   }
 
-  Col.checkBulletPlayer(this.enemyBullets.list, this.player, this.particles, this.audio, this.camera);
+  var playerHit = Col.checkBulletPlayer(this.enemyBullets.list, this.player, this.particles, this.audio, this.camera);
+  if (playerHit) { this.screenRedFlash = Math.min(1, this.screenRedFlash + 0.4); }
   Col.checkEnemyPlayer(this.enemies, this.player, this.particles, this.audio, this.camera);
 
   var puType = Col.checkPowerupPlayer(this.powerups, this.player, this.audio);
@@ -4594,11 +4953,14 @@ Game.prototype._update = function(dt) {
 
 Game.prototype._render = function() {
   var ctx = this.ctx;
-  var ox = this.camera.ox, oy = this.camera.oy;
+  var ox = this.camera.ox, oy = this.camera.oy, or = this.camera.or;
 
   ctx.clearRect(0, 0, CFG.BW, CFG.BH);
   ctx.save();
-  ctx.translate(ox, oy);
+  // 微旋转偏移 - 增加震动临场感
+  ctx.translate(CFG.BW / 2, CFG.BH / 2);
+  ctx.rotate(or);
+  ctx.translate(-CFG.BW / 2 + ox, -CFG.BH / 2 + oy);
 
   this.starField.render(ctx, this.time);
 
@@ -4619,9 +4981,26 @@ Game.prototype._render = function() {
 
   ctx.restore();
 
-  // 屏幕闪光
+  // 屏幕闪白（击杀）
   if (this.screenFlash > 0.01) {
     ctx.fillStyle = 'rgba(255,255,255,' + (this.screenFlash * 0.15) + ')';
+    ctx.fillRect(0, 0, CFG.BW, CFG.BH);
+  }
+
+  // 屏幕闪红（玩家受伤）
+  if (this.screenRedFlash > 0.01) {
+    ctx.fillStyle = 'rgba(255,30,30,' + (this.screenRedFlash * 0.25) + ')';
+    ctx.fillRect(0, 0, CFG.BW, CFG.BH);
+  }
+
+  // 高连击时屏幕边缘能量光晕
+  if (this.combo && this.combo.multiplier > 1.5) {
+    var glowAlpha = Math.min(0.3, (this.combo.multiplier - 1.5) * 0.08);
+    var pulse = 0.7 + Math.sin(this.time * 6) * 0.3;
+    var edgeGlow = ctx.createRadialGradient(CFG.BW / 2, CFG.BH / 2, CFG.BH * 0.35, CFG.BW / 2, CFG.BH / 2, CFG.BH * 0.6);
+    edgeGlow.addColorStop(0, 'rgba(0,0,0,0)');
+    edgeGlow.addColorStop(1, 'rgba(0,200,255,' + (glowAlpha * pulse) + ')');
+    ctx.fillStyle = edgeGlow;
     ctx.fillRect(0, 0, CFG.BW, CFG.BH);
   }
 
